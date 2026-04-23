@@ -5,7 +5,7 @@ timm==0.9.12         # Critical: Provides easy access to ViT architectures
 
 # Experiment Tracking
 mlflow               # tracking dashboard
-pyyaml               # For parsing your config files
+pyyaml               # For parsing config files
 
 # Analysis & Interpretability
 captum               # The gold standard for model explainability (Grad-CAM, Saliency)
