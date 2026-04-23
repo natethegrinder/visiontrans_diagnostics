@@ -1,0 +1,19 @@
+# Deep Learning Core
+torch>=2.0.0
+torchvision
+timm==0.9.12         # Critical: Provides easy access to ViT architectures
+
+# Experiment Tracking
+mlflow               # Your tracking dashboard
+pyyaml               # For parsing your config files
+
+# Analysis & Interpretability
+captum               # The gold standard for model explainability (Grad-CAM, Saliency)
+matplotlib
+seaborn              # Essential for plotting your AUC/ROC curves
+scikit-learn         # For calculating precision, recall, and F1-score
+
+# Data Handling
+pandas
+numpy
+pillow               # Image processing
