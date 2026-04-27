@@ -1,0 +1,15 @@
+extends: base.yaml
+
+run:
+  name: cnn_resnet18_baseline
+  type: architecture_comparison
+
+model:
+  family: cnn
+  architecture: resnet18
+  pretrained: true
+  dropout: 0.2
+
+training:
+  learning_rate: 0.0001
+  batch_size: 32

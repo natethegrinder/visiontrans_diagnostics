@@ -1,0 +1,21 @@
+extends: base.yaml
+
+run:
+  name: robustness_noise_blur_brightness
+  type: robustness
+
+checkpoints:
+  cnn: artifacts/models/resnet18_best.pt
+  vit: artifacts/models/vit_tiny_best.pt
+
+robustness:
+  corruptions:
+    - name: gaussian_noise
+      levels: [0.05, 0.10, 0.20]
+    - name: blur
+      levels: [3, 5, 7]
+    - name: brightness
+      levels: [0.75, 1.25, 1.50]
+
+evaluation:
+  split: test

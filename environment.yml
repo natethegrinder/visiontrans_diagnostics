@@ -1,0 +1,31 @@
+name: visiontrans-diagnostics
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+
+  # Deep Learning Core
+  - pytorch>=2.0
+  - torchvision
+
+  # Experiment Tracking
+  - mlflow
+  - pyyaml
+
+  # Analysis & Interpretability
+  - matplotlib
+  - seaborn
+  - scikit-learn
+
+  # Data Handling
+  - pandas
+  - numpy
+  - pillow
+
+  - pip:
+      - timm==0.9.12
+      - captum
+      - kagglehub

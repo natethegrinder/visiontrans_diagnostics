@@ -1,0 +1,18 @@
+extends: base.yaml
+
+run:
+  name: interpretability_bbox_iou
+  type: interpretability
+
+checkpoints:
+  cnn: artifacts/models/resnet18_best.pt
+  vit: artifacts/models/vit_tiny_best.pt
+
+interpretability:
+  methods:
+    cnn: grad_cam
+    vit: attention_rollout
+  bbox_annotations: data/annotations/BBox_list_2017.csv
+  heatmap_threshold: 0.80
+  save_examples: true
+  num_examples: 100

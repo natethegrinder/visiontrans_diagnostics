@@ -6,6 +6,7 @@ project:
 data:
   dataset: nih_chest_xray
   raw_dir: data/raw
+  annotations_dir: data/annotations
   processed_dir: data/processed
   manifest_dir: data/manifests
   train_manifest: data/manifests/train.csv
