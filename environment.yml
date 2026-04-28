@@ -20,6 +20,10 @@ dependencies:
   - seaborn
   - scikit-learn
 
+  # jupyter and python kernel 
+  - ipykernel
+  - jupyterlab
+
   # Data Handling
   - pandas
   - numpy
