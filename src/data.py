@@ -271,7 +271,6 @@ def build_nih_manifests(
     if train_df.empty:
         raise ValueError("Training split is empty. Reduce val_fraction or verify patient IDs in metadata.")
 
-    split_frames = {"train": train_df, "val": val_df, "test": test_df}
     metadata_columns_to_keep = []
     optional_columns = [
         ("follow_up", follow_up_column),
@@ -285,6 +284,11 @@ def build_nih_manifests(
         if column_name is not None:
             metadata[export_name] = metadata[column_name]
             metadata_columns_to_keep.append(export_name)
+
+    train_df = metadata.loc[train_df.index].copy()
+    val_df = metadata.loc[val_df.index].copy()
+    test_df = metadata.loc[test_df.index].copy()
+    split_frames = {"train": train_df, "val": val_df, "test": test_df}
 
     exported_columns = [
         "image_name",
