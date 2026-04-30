@@ -324,14 +324,24 @@ def default_normalization(num_channels: int) -> tuple[tuple[float, ...], tuple[f
 def build_image_transform(
     image_size: int,
     num_channels: int = 1,
+    is_train: bool = False,
     mean: Optional[Sequence[float]] = None,
     std: Optional[Sequence[float]] = None,
 ) -> transforms.Compose:
     if mean is None or std is None:
         mean, std = default_normalization(num_channels)
 
+    aug: list = []
+    if is_train:
+        aug = [
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomRotation(10),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2),
+        ]
+
     return transforms.Compose(
         [
+            *aug,
             transforms.Resize((image_size, image_size), interpolation=InterpolationMode.BICUBIC),
             transforms.ToTensor(),
             transforms.Normalize(mean=mean, std=std),
@@ -345,6 +355,7 @@ class NihChestXrayDataset(Dataset):
         manifest_path: str | Path,
         image_size: int = 224,
         num_channels: int = 1,
+        is_train: bool = False,
         mean: Optional[Sequence[float]] = None,
         std: Optional[Sequence[float]] = None,
     ) -> None:
@@ -358,6 +369,7 @@ class NihChestXrayDataset(Dataset):
         self.transform = build_image_transform(
             image_size=image_size,
             num_channels=num_channels,
+            is_train=is_train,
             mean=mean,
             std=std,
         )
@@ -393,6 +405,7 @@ def build_dataloaders(
             manifest_path=data_config["train_manifest"],
             image_size=image_size,
             num_channels=num_channels,
+            is_train=True,
             mean=mean,
             std=std,
         ),
@@ -400,6 +413,7 @@ def build_dataloaders(
             manifest_path=data_config["val_manifest"],
             image_size=image_size,
             num_channels=num_channels,
+            is_train=False,
             mean=mean,
             std=std,
         ),
@@ -410,6 +424,7 @@ def build_dataloaders(
             manifest_path=data_config["test_manifest"],
             image_size=image_size,
             num_channels=num_channels,
+            is_train=False,
             mean=mean,
             std=std,
         )
