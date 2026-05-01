@@ -34,6 +34,7 @@ evaluation:
     - confusion_matrix
 
 mlflow:
-  tracking_uri: mlruns
+  tracking_uri: sqlite:///mlflow.db
   experiment_name: cnn_vs_vit_medical
+  artifact_location: mlruns
   log_artifacts: true
