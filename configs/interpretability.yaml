@@ -1,0 +1,12 @@
+extends: cnn_baseline.yaml
+
+run:
+  name: cnn_grad_cam_bbox_iou
+  type: interpretability
+
+interpretability:
+  method: grad_cam
+  bbox_annotations: data/annotations/BBox_List_2017.csv
+  heatmap_threshold: 0.80
+  save_examples: true
+  num_examples: 100

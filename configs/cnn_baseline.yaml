@@ -1,0 +1,40 @@
+extends: base.yaml
+
+run:
+  name: cnn_resnet18_nih_baseline
+  type: cnn_baseline
+
+data:
+  dataset: nih_chest_xray
+  num_channels: 1
+  num_classes: 14
+  image_size: 224
+  val_fraction: 0.1
+  batch_size: 32
+  num_workers: 4
+
+model:
+  family: cnn
+  architecture: resnet18
+  pretrained: false
+  dropout: 0.2
+
+training:
+  epochs: 25
+  optimizer: adamw
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  loss: bce_with_logits
+  focal_loss:
+    gamma: 2.0
+    alpha: 0.25
+  scheduler: cosine
+  early_stopping_patience: 10
+  imbalance:
+    enabled: true  
+    strategy: pos_weight
+    min_positive_count: 1.0
+    max_pos_weight: 20.0
+
+evaluation:
+  threshold: 0.5

@@ -5,6 +5,8 @@ __pycache__/
 
 # data, ignore the data files 
 data/
+outputs/
+mlruns/
 
 # C extensions
 *.so
@@ -208,3 +210,8 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+outputs/ 
+outputs/ 
+mlruns/ 
+outputs/ 
+mlruns/ 
