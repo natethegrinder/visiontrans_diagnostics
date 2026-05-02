@@ -12,7 +12,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from data import (
     NIH_CHEST_XRAY_LABELS,
     NihChestXrayDataset,
+    build_eval_transform,
     build_nih_manifests,
+    build_train_transform,
+    compute_pos_weight_from_manifest,
     sanity_check_nih_dataset,
 )
 from models.components import PatchEmbedding, ViTInputEmbedding
@@ -78,6 +81,18 @@ class DataPreparationTests(unittest.TestCase):
             self.assertEqual(summary["matched_images"], 3)
             self.assertEqual(summary["missing_images"], 0)
 
+            pos_weight_stats = compute_pos_weight_from_manifest(manifest_paths["train"], pos_weight_clamp=50)
+            train_manifest_df = pd.read_csv(manifest_paths["train"])
+            self.assertEqual(tuple(pos_weight_stats["pos_weight_tensor"].shape), (14,))
+            self.assertEqual(
+                pos_weight_stats["positive_counts"]["Atelectasis"],
+                int(train_manifest_df["Atelectasis"].sum()),
+            )
+            self.assertEqual(
+                pos_weight_stats["negative_counts"]["Atelectasis"],
+                len(train_manifest_df) - int(train_manifest_df["Atelectasis"].sum()),
+            )
+
     def test_vit_input_embedding_shape(self) -> None:
         module = ViTInputEmbedding(
             image_size=224,
@@ -122,6 +137,32 @@ class DataPreparationTests(unittest.TestCase):
         self.assertEqual(tuple(output_tokens.shape), (2, 197, 192))
         self.assertTrue(torch.allclose(output_tokens[:, :1, :], expected_cls, atol=1e-6))
         self.assertTrue(torch.allclose(output_tokens[:, 1:, :], expected_patch_tokens, atol=1e-6))
+
+    def test_train_and_eval_transforms_split_augmentation_correctly(self) -> None:
+        train_transform = build_train_transform(
+            image_size=224,
+            num_channels=1,
+            augmentation_config={
+                "enabled": True,
+                "horizontal_flip_prob": 0.5,
+                "rotation_degrees": 10,
+                "color_jitter_brightness": 0.2,
+                "color_jitter_contrast": 0.2,
+            },
+        )
+        eval_transform = build_eval_transform(image_size=224, num_channels=1)
+
+        train_transform_names = [type(step).__name__ for step in train_transform.transforms]
+        eval_transform_names = [type(step).__name__ for step in eval_transform.transforms]
+
+        self.assertEqual(
+            train_transform_names,
+            ["Resize", "RandomHorizontalFlip", "RandomRotation", "ColorJitter", "ToTensor", "Normalize"],
+        )
+        self.assertEqual(
+            eval_transform_names,
+            ["Resize", "ToTensor", "Normalize"],
+        )
 
 
 if __name__ == "__main__":
