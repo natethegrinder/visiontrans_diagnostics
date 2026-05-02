@@ -9,6 +9,7 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from data import NIH_CHEST_XRAY_LABELS, build_nih_data_module
+from interpretability import build_cls_attention_heatmap
 from models import build_model
 
 
@@ -131,6 +132,45 @@ class ViTDataPipelineTests(unittest.TestCase):
             logits = model(images)
 
             self.assertEqual(tuple(logits.shape), (images.shape[0], 14))
+
+    def test_vit_model_can_return_attention_maps_without_breaking_default_api(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config = _create_mock_nih_dataset(Path(tmp_dir))
+            data_module = build_nih_data_module(config)
+            model = build_model(config)
+
+            images, _ = next(iter(data_module["dataloaders"]["train"]))
+            logits = model(images)
+            logits_with_attention, attn_maps = model(images, return_attention=True)
+
+            self.assertEqual(tuple(logits.shape), (images.shape[0], 14))
+            self.assertEqual(tuple(logits_with_attention.shape), (images.shape[0], 14))
+            self.assertEqual(len(attn_maps), config["model"]["num_layers"])
+            self.assertEqual(
+                tuple(attn_maps[-1].shape),
+                (images.shape[0], config["model"]["num_heads"], 197, 197),
+            )
+            cls_attn = attn_maps[-1][:, :, 0, 1:]
+            self.assertEqual(tuple(cls_attn.shape), (images.shape[0], config["model"]["num_heads"], 196))
+
+    def test_cls_attention_can_be_converted_to_patch_grid_and_image_heatmap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config = _create_mock_nih_dataset(Path(tmp_dir))
+            data_module = build_nih_data_module(config)
+            model = build_model(config)
+
+            images, _ = next(iter(data_module["dataloaders"]["train"]))
+            _, attn_maps = model(images, return_attention=True)
+            patch_grid, heatmap = build_cls_attention_heatmap(
+                attn_maps,
+                image_size=config["data"]["image_size"],
+                patch_size=config["model"]["patch_size"],
+            )
+
+            self.assertEqual(tuple(patch_grid.shape), (images.shape[0], 14, 14))
+            self.assertEqual(tuple(heatmap.shape), (images.shape[0], 1, 224, 224))
+            self.assertGreaterEqual(float(heatmap.min()), 0.0)
+            self.assertLessEqual(float(heatmap.max()), 1.0)
 
 
 if __name__ == "__main__":
