@@ -13,9 +13,22 @@ data:
   val_manifest: data/manifests/val.csv
   test_manifest: data/manifests/test.csv
   image_size: 224
+  num_channels: 1
   num_classes: 14
   batch_size: 32
   num_workers: 4
+  val_fraction: 0.1
+  pos_weight_clamp: 50
+  augmentation:
+    enabled: false
+    horizontal_flip_prob: 0.5
+    rotation_degrees: 10
+    color_jitter_brightness: 0.2
+    color_jitter_contrast: 0.2
+    crop_type: none
+    crop_scale:
+  normalize_mean: [0.5]
+  normalize_std: [0.25]
 
 training:
   epochs: 30
@@ -23,7 +36,13 @@ training:
   learning_rate: 0.0001
   weight_decay: 0.0001
   loss: bce_with_logits
+  use_pos_weight: true
+  focal_gamma: 2.0
+  focal_alpha: 0.25
   scheduler: cosine
+  threshold: 0.5
+  gradient_clip_norm:
+  checkpoint_dir: artifacts/models
   early_stopping_patience: 5
 
 evaluation:
