@@ -321,14 +321,23 @@ def default_normalization(num_channels: int) -> tuple[tuple[float, ...], tuple[f
     raise ValueError(f"Unsupported number of channels: {num_channels}")
 
 
-def build_image_transform(
+def _normalize_stats_from_config(
+    mean: Optional[Sequence[float]],
+    std: Optional[Sequence[float]],
+    num_channels: int,
+) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    if mean is None or std is None:
+        return default_normalization(num_channels)
+    return tuple(float(value) for value in mean), tuple(float(value) for value in std)
+
+
+def build_eval_transform(
     image_size: int,
     num_channels: int = 1,
     mean: Optional[Sequence[float]] = None,
     std: Optional[Sequence[float]] = None,
 ) -> transforms.Compose:
-    if mean is None or std is None:
-        mean, std = default_normalization(num_channels)
+    mean, std = _normalize_stats_from_config(mean, std, num_channels)
 
     return transforms.Compose(
         [
@@ -339,12 +348,60 @@ def build_image_transform(
     )
 
 
+def build_train_transform(
+    image_size: int,
+    num_channels: int = 1,
+    mean: Optional[Sequence[float]] = None,
+    std: Optional[Sequence[float]] = None,
+    augmentation_config: Optional[dict] = None,
+) -> transforms.Compose:
+    mean, std = _normalize_stats_from_config(mean, std, num_channels)
+    augmentation_config = augmentation_config or {}
+
+    augmentation_enabled = bool(augmentation_config.get("enabled", False))
+    horizontal_flip_prob = float(augmentation_config.get("horizontal_flip_prob", 0.0))
+    rotation_degrees = float(augmentation_config.get("rotation_degrees", 0.0))
+    color_jitter_brightness = float(augmentation_config.get("color_jitter_brightness", 0.0))
+    color_jitter_contrast = float(augmentation_config.get("color_jitter_contrast", 0.0))
+
+    transform_steps: list[transforms.Transform] = [
+        transforms.Resize((image_size, image_size), interpolation=InterpolationMode.BICUBIC)
+    ]
+    if augmentation_enabled:
+        if horizontal_flip_prob > 0:
+            transform_steps.append(transforms.RandomHorizontalFlip(p=horizontal_flip_prob))
+        if rotation_degrees > 0:
+            transform_steps.append(
+                transforms.RandomRotation(
+                    degrees=rotation_degrees,
+                    interpolation=InterpolationMode.BILINEAR,
+                    fill=0,
+                )
+            )
+        if color_jitter_brightness > 0 or color_jitter_contrast > 0:
+            transform_steps.append(
+                transforms.ColorJitter(
+                    brightness=color_jitter_brightness,
+                    contrast=color_jitter_contrast,
+                )
+            )
+
+    transform_steps.extend(
+        [
+            transforms.ToTensor(),
+            transforms.Normalize(mean=mean, std=std),
+        ]
+    )
+    return transforms.Compose(transform_steps)
+
+
 class NihChestXrayDataset(Dataset):
     def __init__(
         self,
         manifest_path: str | Path,
         image_size: int = 224,
         num_channels: int = 1,
+        transform: Optional[transforms.Compose] = None,
         mean: Optional[Sequence[float]] = None,
         std: Optional[Sequence[float]] = None,
     ) -> None:
@@ -355,7 +412,7 @@ class NihChestXrayDataset(Dataset):
         self.frame = pd.read_csv(self.manifest_path)
         self.image_size = image_size
         self.num_channels = num_channels
-        self.transform = build_image_transform(
+        self.transform = transform or build_eval_transform(
             image_size=image_size,
             num_channels=num_channels,
             mean=mean,
@@ -382,17 +439,32 @@ def build_dataloaders(
 ) -> dict[str, DataLoader]:
     data_config = config.get("data", {})
     training_config = config.get("training", {})
+    augmentation_config = data_config.get("augmentation", {})
 
     image_size = int(data_config.get("image_size", 224))
     num_channels = int(data_config.get("num_channels", 1))
     batch_size = int(training_config.get("batch_size", data_config.get("batch_size", 32)))
     num_workers = int(data_config.get("num_workers", 4))
+    train_transform = build_train_transform(
+        image_size=image_size,
+        num_channels=num_channels,
+        mean=mean,
+        std=std,
+        augmentation_config=augmentation_config,
+    )
+    eval_transform = build_eval_transform(
+        image_size=image_size,
+        num_channels=num_channels,
+        mean=mean,
+        std=std,
+    )
 
     datasets = {
         "train": NihChestXrayDataset(
             manifest_path=data_config["train_manifest"],
             image_size=image_size,
             num_channels=num_channels,
+            transform=train_transform,
             mean=mean,
             std=std,
         ),
@@ -400,6 +472,7 @@ def build_dataloaders(
             manifest_path=data_config["val_manifest"],
             image_size=image_size,
             num_channels=num_channels,
+            transform=eval_transform,
             mean=mean,
             std=std,
         ),
@@ -410,6 +483,7 @@ def build_dataloaders(
             manifest_path=data_config["test_manifest"],
             image_size=image_size,
             num_channels=num_channels,
+            transform=eval_transform,
             mean=mean,
             std=std,
         )
@@ -426,6 +500,44 @@ def build_dataloaders(
     }
 
     return dataloaders
+
+
+def compute_pos_weight_from_manifest(
+    manifest_path: str | Path,
+    pos_weight_clamp: Optional[float] = 50.0,
+) -> dict[str, object]:
+    manifest = pd.read_csv(manifest_path)
+    total_count = len(manifest)
+    positive_counts = manifest.loc[:, NIH_CHEST_XRAY_LABELS].sum(axis=0).astype("float32")
+    negative_counts = total_count - positive_counts
+
+    unclamped = []
+    clamped = []
+    prevalence = []
+    for label in NIH_CHEST_XRAY_LABELS:
+        pos_count = float(positive_counts[label])
+        neg_count = float(negative_counts[label])
+        prevalence.append(pos_count / total_count if total_count > 0 else float("nan"))
+        if pos_count <= 0:
+            weight = float(pos_weight_clamp) if pos_weight_clamp is not None else 1.0
+        else:
+            weight = neg_count / pos_count
+            if pos_weight_clamp is not None:
+                weight = min(weight, float(pos_weight_clamp))
+
+        unclamped_weight = neg_count / pos_count if pos_count > 0 else float("inf")
+        unclamped.append(float(unclamped_weight))
+        clamped.append(float(weight))
+
+    return {
+        "label_names": NIH_CHEST_XRAY_LABELS,
+        "positive_counts": {label: int(positive_counts[label]) for label in NIH_CHEST_XRAY_LABELS},
+        "negative_counts": {label: int(negative_counts[label]) for label in NIH_CHEST_XRAY_LABELS},
+        "prevalence": {label: float(prevalence[idx]) for idx, label in enumerate(NIH_CHEST_XRAY_LABELS)},
+        "pos_weight_unclamped": {label: float(unclamped[idx]) for idx, label in enumerate(NIH_CHEST_XRAY_LABELS)},
+        "pos_weight": {label: float(clamped[idx]) for idx, label in enumerate(NIH_CHEST_XRAY_LABELS)},
+        "pos_weight_tensor": torch.tensor(clamped, dtype=torch.float32),
+    }
 
 
 def build_nih_data_module(config: dict) -> dict[str, object]:
@@ -446,4 +558,13 @@ def build_nih_data_module(config: dict) -> dict[str, object]:
         )
 
     dataloaders = build_dataloaders(config)
-    return {"labels": NIH_CHEST_XRAY_LABELS, "dataloaders": dataloaders, "test_manifest": test_manifest}
+    pos_weight_stats = compute_pos_weight_from_manifest(
+        manifest_path=train_manifest,
+        pos_weight_clamp=data_config.get("pos_weight_clamp", 50),
+    )
+    return {
+        "labels": NIH_CHEST_XRAY_LABELS,
+        "dataloaders": dataloaders,
+        "test_manifest": test_manifest,
+        "pos_weight_stats": pos_weight_stats,
+    }
