@@ -7,14 +7,16 @@ run:
 model:
   family: vit
   architecture: vit_tiny
-  pretrained: true
+  pretrained: false
   patch_size: 16
   hidden_dim: 192
-  num_heads: 3
-  num_layers: 12
+  num_heads: 6
+  num_layers: 6
+  dim_feedforward: 768
   dropout: 0.1
+  norm_first: true
 
 training:
-  learning_rate: 0.00005
+  learning_rate: 0.0001
   batch_size: 16
   warmup_epochs: 5
