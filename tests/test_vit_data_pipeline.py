@@ -4,11 +4,14 @@ import unittest
 from pathlib import Path
 
 import pandas as pd
+import torch
+from torch import nn
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from data import NIH_CHEST_XRAY_LABELS, build_nih_data_module
+from evaluate import evaluate_epoch
 from interpretability import build_cls_attention_heatmap
 from models import build_model
 
@@ -171,6 +174,27 @@ class ViTDataPipelineTests(unittest.TestCase):
             self.assertEqual(tuple(heatmap.shape), (images.shape[0], 1, 224, 224))
             self.assertGreaterEqual(float(heatmap.min()), 0.0)
             self.assertLessEqual(float(heatmap.max()), 1.0)
+
+    def test_evaluate_epoch_can_return_outputs_for_threshold_tuning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config = _create_mock_nih_dataset(Path(tmp_dir))
+            data_module = build_nih_data_module(config)
+            model = build_model(config)
+            loss_fn = nn.BCEWithLogitsLoss()
+
+            metrics, logits, labels = evaluate_epoch(
+                model=model,
+                data_loader=data_module["dataloaders"]["val"],
+                loss_fn=loss_fn,
+                device=torch.device("cpu"),
+                label_names=NIH_CHEST_XRAY_LABELS,
+                threshold=0.5,
+                return_outputs=True,
+            )
+
+            self.assertIn("mean_auc", metrics)
+            self.assertEqual(tuple(logits.shape), (len(data_module["dataloaders"]["val"].dataset), 14))
+            self.assertEqual(tuple(labels.shape), (len(data_module["dataloaders"]["val"].dataset), 14))
 
 
 if __name__ == "__main__":
