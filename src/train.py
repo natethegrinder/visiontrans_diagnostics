@@ -155,6 +155,7 @@ def train_one_epoch(
     label_names: list[str],
     threshold: float = 0.5,
     gradient_clip_norm: float | None = None,
+    max_batches: int | None = None,
 ) -> dict[str, float]:
     model.train()
     running_loss = 0.0
@@ -162,7 +163,9 @@ def train_one_epoch(
     epoch_logits: list[torch.Tensor] = []
     epoch_labels: list[torch.Tensor] = []
 
-    for images, labels in data_loader:
+    for batch_index, (images, labels) in enumerate(data_loader):
+        if max_batches is not None and batch_index >= max_batches:
+            break
         images = images.to(device)
         labels = labels.to(device)
 
@@ -192,6 +195,7 @@ def build_run_params(config: dict, pos_weight_stats: dict) -> dict[str, object]:
     model_config = config.get("model", {})
     training_config = config.get("training", {})
     augmentation_config = data_config.get("augmentation", {})
+    runtime_config = config.get("runtime", {})
     mean, std = data_config.get("normalize_mean"), data_config.get("normalize_std")
     if mean is None or std is None:
         from data import default_normalization
@@ -231,6 +235,8 @@ def build_run_params(config: dict, pos_weight_stats: dict) -> dict[str, object]:
         "crop_scale": augmentation_config.get("crop_scale"),
         "normalize_mean": mean,
         "normalize_std": std,
+        "runtime_max_train_batches": runtime_config.get("max_train_batches"),
+        "runtime_max_val_batches": runtime_config.get("max_val_batches"),
     }
 
 
@@ -266,6 +272,11 @@ def train_model(
     tune_thresholds = bool(config.get("training", {}).get("tune_thresholds", False))
     threshold_tuning_objective = str(config.get("training", {}).get("threshold_tuning_objective", "f1"))
     threshold_grid = config.get("training", {}).get("threshold_grid")
+    runtime_config = config.get("runtime", {})
+    max_train_batches = runtime_config.get("max_train_batches")
+    max_val_batches = runtime_config.get("max_val_batches")
+    max_train_batches = int(max_train_batches) if max_train_batches is not None else None
+    max_val_batches = int(max_val_batches) if max_val_batches is not None else None
 
     configure_mlflow(config)
     effective_run_name = run_name or config.get("run", {}).get("name")
@@ -280,6 +291,7 @@ def train_model(
     best_auc_path = checkpoint_dir / "vit_best_auc.pt"
     best_macro_f1_path = checkpoint_dir / "vit_best_macro_f1.pt"
 
+    train_start_time = time.perf_counter()
     with mlflow.start_run(run_name=effective_run_name, nested=nested_run) as run:
         log_params_flat(build_run_params(config, pos_weight_stats))
         log_label_statistics(pos_weight_stats)
@@ -299,6 +311,7 @@ def train_model(
                 label_names=label_names,
                 threshold=threshold,
                 gradient_clip_norm=gradient_clip_norm,
+                max_batches=max_train_batches,
             )
             val_metrics = evaluate_epoch(
                 model=model,
@@ -308,6 +321,7 @@ def train_model(
                 label_names=label_names,
                 threshold=threshold,
                 return_outputs=tune_thresholds,
+                max_batches=max_val_batches,
             )
 
             if tune_thresholds:
@@ -408,6 +422,7 @@ def train_model(
                 }
             )
 
+    total_runtime_sec = time.perf_counter() - train_start_time
     return {
         "run_id": run.info.run_id,
         "summary_metrics": summary_metrics,
@@ -422,6 +437,7 @@ def train_model(
         "device": str(device),
         "pos_weight_stats": pos_weight_stats,
         "config": config,
+        "total_runtime_sec": total_runtime_sec,
     }
 
 
