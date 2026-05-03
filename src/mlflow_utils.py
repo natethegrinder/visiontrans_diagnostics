@@ -3,16 +3,26 @@ from __future__ import annotations
 from typing import Mapping, Sequence
 
 import mlflow
-
+import os
 
 def configure_mlflow(config: dict) -> None:
     mlflow_config = config.get("mlflow", {})
-    tracking_uri = mlflow_config.get("tracking_uri")
+
+    tracking_uri = (
+        os.environ.get("MLFLOW_TRACKING_URI")
+        or mlflow_config.get("tracking_uri")
+    )
     experiment_name = mlflow_config.get("experiment_name")
+
     if tracking_uri:
         mlflow.set_tracking_uri(tracking_uri)
+
     if experiment_name:
         mlflow.set_experiment(experiment_name)
+
+    print(f"[MLflow] tracking_uri={mlflow.get_tracking_uri()}", flush=True)
+    if experiment_name:
+        print(f"[MLflow] experiment_name={experiment_name}", flush=True)
 
 
 def log_params_flat(params: Mapping[str, object]) -> None:
