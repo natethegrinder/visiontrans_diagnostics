@@ -1,4 +1,8 @@
-"""Evaluate ViT attention artifacts and optional bounding-box overlap metrics."""
+"""Pilot-first ViT attention evaluation experiment.
+
+This script is eval-only. Keep `max_attention_batches` small for pilots because
+attention extraction and heatmap generation can be slow and memory-heavy.
+"""
 
 from __future__ import annotations
 
@@ -13,7 +17,7 @@ import pandas as pd
 import torch
 from PIL import Image
 
-from common import REPO_ROOT, build_per_label_rows, ensure_output_dir, save_json, save_rows_csv
+from common import build_per_label_rows
 from data import build_nih_data_module
 from evaluate import evaluate_epoch
 from interpretability import build_cls_attention_heatmap
@@ -21,19 +25,44 @@ from losses import build_loss_function
 from mlflow_utils import configure_mlflow, log_label_statistics, log_params_flat
 from models import build_model
 from train import build_run_params, load_config, merge_dicts, resolve_device
+from utils import (
+    REPO_ROOT,
+    apply_overrides,
+    apply_runtime_overrides,
+    build_variant_row,
+    ensure_output_dir,
+    flatten_nested_metrics,
+    load_experiment_config,
+    prepare_variants,
+    print_dry_run_plan,
+    write_resolved_config,
+    write_summary_csv,
+    write_summary_json,
+)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="configs/vit_baseline.yaml", help="Path to the ViT baseline config.")
+    parser.add_argument("--config", default="configs/vit_baseline.yaml", help="Path to the base ViT config.")
+    parser.add_argument(
+        "--experiment-config",
+        default="configs/experiments/experiment_3_vit_attention_metrics.yaml",
+        help="Path to the experiment-specific YAML grid.",
+    )
     parser.add_argument("--checkpoint", required=True, help="Path to a trained ViT checkpoint.")
     parser.add_argument("--split", default="val", choices=["val", "test"], help="Evaluation split.")
-    parser.add_argument("--max-heatmaps", type=int, default=16, help="Maximum number of heatmaps to save.")
+    parser.add_argument("--output-dir", default=None, help="Optional experiment output directory override.")
+    parser.add_argument("--dry-run", action="store_true", help="Print planned variants without evaluation.")
+    parser.add_argument("--only", default=None, help="Run only the named variant from the experiment YAML.")
+    parser.add_argument("--max-runs", type=int, default=None, help="Limit the number of variants to run.")
+    parser.add_argument("--max-val-batches", type=int, default=None, help="Optional cap for pilot eval batches.")
     parser.add_argument(
-        "--output-dir",
+        "--max-attention-batches",
+        type=int,
         default=None,
-        help="Directory for experiment outputs. Defaults to outputs/experiments/experiment_3_vit_attention_metrics.",
+        help="Optional cap for batches used for attention heatmaps.",
     )
+    parser.add_argument("--max-heatmaps", type=int, default=20, help="Maximum number of heatmaps to save.")
     return parser
 
 
@@ -59,7 +88,6 @@ def _load_bbox_frame(annotations_dir: Path) -> pd.DataFrame | None:
     bbox_path = _resolve_bbox_path(annotations_dir)
     if bbox_path is None:
         return None
-
     frame = pd.read_csv(bbox_path)
     rename_map = {}
     for column in frame.columns:
@@ -78,16 +106,10 @@ def _load_bbox_frame(annotations_dir: Path) -> pd.DataFrame | None:
             rename_map[column] = "h"
     frame = frame.rename(columns=rename_map)
     required = {"image_name", "x", "y", "w", "h"}
-    if not required.issubset(frame.columns):
-        return None
-    return frame
+    return frame if required.issubset(frame.columns) else None
 
 
-def _denormalize_image(
-    image_tensor: torch.Tensor,
-    mean: tuple[float, ...],
-    std: tuple[float, ...],
-) -> np.ndarray:
+def _denormalize_image(image_tensor: torch.Tensor, mean: tuple[float, ...], std: tuple[float, ...]) -> np.ndarray:
     image = image_tensor.detach().cpu().clone()
     for channel_index, (channel_mean, channel_std) in enumerate(zip(mean, std)):
         image[channel_index] = image[channel_index] * channel_std + channel_mean
@@ -105,12 +127,20 @@ def _save_heatmap_overlay(
     mean: tuple[float, ...],
     std: tuple[float, ...],
 ) -> None:
-    base_image = _denormalize_image(image_tensor, mean=mean, std=std).astype(np.float32) / 255.0
+    base_image = _denormalize_image(image_tensor, mean, std).astype(np.float32) / 255.0
     heatmap_array = heatmap.squeeze(0).detach().cpu().numpy()
     heatmap_rgb = np.zeros_like(base_image)
     heatmap_rgb[..., 0] = heatmap_array
     overlay = (0.65 * base_image + 0.35 * heatmap_rgb).clip(0.0, 1.0)
     Image.fromarray((overlay * 255.0).astype(np.uint8)).save(output_path)
+
+
+def _resolve_layer_index(value: object, num_layers: int) -> int:
+    if isinstance(value, str):
+        if value == "middle":
+            return num_layers // 2
+        return int(value)
+    return int(value)
 
 
 def _compute_bbox_localization_metrics(
@@ -119,10 +149,10 @@ def _compute_bbox_localization_metrics(
     image_size: int,
     original_width: float,
     original_height: float,
-    activation_quantile: float = 0.85,
+    heatmap_percentile: float,
 ) -> dict[str, float]:
     heatmap_array = heatmap.squeeze(0).detach().cpu().numpy()
-    threshold_value = float(np.quantile(heatmap_array, activation_quantile))
+    threshold_value = float(np.percentile(heatmap_array, heatmap_percentile))
     attention_mask = heatmap_array >= threshold_value
 
     bbox_mask = np.zeros((image_size, image_size), dtype=bool)
@@ -147,166 +177,268 @@ def _compute_bbox_localization_metrics(
 
 def main() -> None:
     args = build_arg_parser().parse_args()
-    output_dir = ensure_output_dir("experiment_3_vit_attention_metrics", args.output_dir)
-    heatmap_dir = output_dir / "heatmaps"
-    heatmap_dir.mkdir(parents=True, exist_ok=True)
-
     base_config = load_config(REPO_ROOT / args.config)
-    checkpoint = torch.load(REPO_ROOT / args.checkpoint, map_location="cpu")
+    experiment_config = load_experiment_config(REPO_ROOT / args.experiment_config)
+    output_dir = ensure_output_dir(experiment_config["default_output_dir"], args.output_dir)
+    checkpoint_path = REPO_ROOT / args.checkpoint
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
     checkpoint_config = checkpoint.get("config", {})
-    config = merge_dicts(checkpoint_config, base_config)
+    merged_base_config = merge_dicts(base_config, checkpoint_config)
 
-    device = resolve_device(config)
-    data_module = build_nih_data_module(config)
-    split = args.split if args.split in data_module["dataloaders"] else "val"
-    data_loader = data_module["dataloaders"][split]
-    label_names = list(data_module["labels"])
-    pos_weight_stats = data_module["pos_weight_stats"]
-    use_pos_weight = bool(config.get("training", {}).get("use_pos_weight", True))
-    pos_weight_tensor = pos_weight_stats["pos_weight_tensor"].to(device) if use_pos_weight else None
-    loss_fn = build_loss_function(config, pos_weight=pos_weight_tensor)
-
-    model = build_model(config).to(device)
-    model.load_state_dict(checkpoint["model_state_dict"])
-
-    if device.type == "cuda":
-        torch.cuda.reset_peak_memory_stats(device)
-    inference_start = time.perf_counter()
-    metrics = evaluate_epoch(
-        model=model,
-        data_loader=data_loader,
-        loss_fn=loss_fn,
-        device=device,
-        label_names=label_names,
-        threshold=float(config.get("training", {}).get("threshold", 0.5)),
+    runtime_defaults = experiment_config.get("runtime_defaults", {})
+    selected_only = args.only
+    if not args.dry_run and selected_only is None and args.max_runs is None:
+        selected_only = experiment_config.get("default_pilot_variant")
+    variants = prepare_variants(
+        experiment_config,
+        only=selected_only,
+        max_runs=args.max_runs if args.max_runs is not None else runtime_defaults.get("max_runs"),
     )
-    inference_time_sec = time.perf_counter() - inference_start
-    peak_gpu_memory_mb = (
-        float(torch.cuda.max_memory_allocated(device) / (1024 ** 2))
-        if device.type == "cuda" and torch.cuda.is_available()
-        else 0.0
-    )
+    runtime_overrides = {
+        "max_val_batches": args.max_val_batches if args.max_val_batches is not None else runtime_defaults.get("max_val_batches"),
+        "max_attention_batches": (
+            args.max_attention_batches
+            if args.max_attention_batches is not None
+            else runtime_defaults.get("max_attention_batches")
+        ),
+    }
 
-    data_config = config.get("data", {})
-    mean = tuple(float(value) for value in data_config.get("normalize_mean", [0.5]))
-    std = tuple(float(value) for value in data_config.get("normalize_std", [0.25]))
-    image_size = int(data_config.get("image_size", 224))
-    patch_size = int(config.get("model", {}).get("patch_size", 16))
-    bbox_frame = _load_bbox_frame(Path(data_config["annotations_dir"]))
+    if args.dry_run:
+        print_dry_run_plan(experiment_config, variants, runtime_overrides)
+        return
 
-    heatmap_rows: list[dict[str, object]] = []
-    localization_rows: list[dict[str, object]] = []
-    saved_heatmaps = 0
-    sample_offset = 0
-    dataset_frame = data_loader.dataset.frame.reset_index(drop=True)
+    summary_rows: list[dict[str, object]] = []
+    per_label_rows: list[dict[str, object]] = []
 
-    model.eval()
-    with torch.inference_mode():
-        for images, _ in data_loader:
-            if saved_heatmaps >= args.max_heatmaps:
-                break
+    for variant in variants:
+        variant_output_dir = output_dir / variant["name"]
+        heatmap_dir = variant_output_dir / "heatmaps"
+        heatmap_dir.mkdir(parents=True, exist_ok=True)
 
-            batch_size = images.size(0)
-            batch_frame = dataset_frame.iloc[sample_offset : sample_offset + batch_size].reset_index(drop=True)
-            sample_offset += batch_size
+        resolved_config = apply_overrides(merged_base_config, variant.get("overrides", {}))
+        resolved_config = apply_runtime_overrides(
+            resolved_config,
+            max_val_batches=runtime_overrides["max_val_batches"],
+            max_attention_batches=runtime_overrides["max_attention_batches"],
+        )
+        resolved_config.setdefault("run", {})
+        resolved_config["run"]["name"] = f"{experiment_config['experiment_name']}__{variant['name']}"
 
-            logits, attn_maps = model(images.to(device), return_attention=True)
-            attn_maps_cpu = [attention.detach().cpu() for attention in attn_maps]
-            _, heatmaps = build_cls_attention_heatmap(
-                attn_maps_cpu,
-                image_size=image_size,
-                patch_size=patch_size,
-            )
+        resolved_config_path = variant_output_dir / "resolved_config.yaml"
+        write_resolved_config(resolved_config_path, resolved_config)
 
-            for sample_index in range(batch_size):
+        device = resolve_device(resolved_config)
+        data_module = build_nih_data_module(resolved_config)
+        split = args.split if args.split in data_module["dataloaders"] else "val"
+        data_loader = data_module["dataloaders"][split]
+        label_names = list(data_module["labels"])
+        pos_weight_stats = data_module["pos_weight_stats"]
+        use_pos_weight = bool(resolved_config.get("training", {}).get("use_pos_weight", True))
+        pos_weight_tensor = pos_weight_stats["pos_weight_tensor"].to(device) if use_pos_weight else None
+        loss_fn = build_loss_function(resolved_config, pos_weight=pos_weight_tensor)
+
+        model = build_model(resolved_config).to(device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
+        inference_start = time.perf_counter()
+        metrics = evaluate_epoch(
+            model=model,
+            data_loader=data_loader,
+            loss_fn=loss_fn,
+            device=device,
+            label_names=label_names,
+            threshold=float(resolved_config.get("training", {}).get("threshold", 0.5)),
+            max_batches=resolved_config.get("runtime", {}).get("max_val_batches"),
+        )
+        inference_time_sec = time.perf_counter() - inference_start
+        peak_gpu_memory_mb = (
+            float(torch.cuda.max_memory_allocated(device) / (1024 ** 2))
+            if device.type == "cuda" and torch.cuda.is_available()
+            else 0.0
+        )
+
+        data_config = resolved_config.get("data", {})
+        interpretability_config = resolved_config.get("interpretability", {})
+        mean = tuple(float(value) for value in data_config.get("normalize_mean", [0.5]))
+        std = tuple(float(value) for value in data_config.get("normalize_std", [0.25]))
+        image_size = int(data_config.get("image_size", 224))
+        patch_size = int(resolved_config.get("model", {}).get("patch_size", 16))
+        bbox_frame = _load_bbox_frame(Path(data_config["annotations_dir"]))
+        layer_index = _resolve_layer_index(
+            interpretability_config.get("layer_index", -1),
+            num_layers=int(resolved_config.get("model", {}).get("num_layers", 1)),
+        )
+        head_reduction = str(interpretability_config.get("head_reduction", "mean"))
+        heatmap_percentile = float(interpretability_config.get("heatmap_percentile", 80.0))
+        max_attention_batches = resolved_config.get("runtime", {}).get(
+            "max_attention_batches",
+            interpretability_config.get("max_attention_batches"),
+        )
+        max_attention_batches = int(max_attention_batches) if max_attention_batches is not None else None
+
+        heatmap_rows: list[dict[str, object]] = []
+        localization_rows: list[dict[str, object]] = []
+        saved_heatmaps = 0
+        sample_offset = 0
+        dataset_frame = data_loader.dataset.frame.reset_index(drop=True)
+
+        model.eval()
+        with torch.inference_mode():
+            for batch_index, (images, _) in enumerate(data_loader):
+                if max_attention_batches is not None and batch_index >= max_attention_batches:
+                    break
                 if saved_heatmaps >= args.max_heatmaps:
                     break
 
-                row = batch_frame.iloc[sample_index]
-                image_name = str(row["image_name"])
-                output_path = heatmap_dir / f"{saved_heatmaps:03d}_{image_name.replace('/', '_')}.png"
-                _save_heatmap_overlay(
-                    output_path,
-                    image_tensor=images[sample_index],
-                    heatmap=heatmaps[sample_index],
-                    mean=mean,
-                    std=std,
-                )
-                heatmap_rows.append(
-                    {
-                        "image_name": image_name,
-                        "artifact_path": str(output_path),
-                        "view_position": row.get("view_position"),
-                    }
+                batch_size = images.size(0)
+                batch_frame = dataset_frame.iloc[sample_offset : sample_offset + batch_size].reset_index(drop=True)
+                sample_offset += batch_size
+
+                _, attn_maps = model(images.to(device), return_attention=True)
+                attn_maps_cpu = [attention.detach().cpu() for attention in attn_maps]
+                _, heatmaps = build_cls_attention_heatmap(
+                    attn_maps_cpu,
+                    image_size=image_size,
+                    patch_size=patch_size,
+                    layer_index=layer_index,
+                    head_reduction=head_reduction,
                 )
 
-                if bbox_frame is not None:
-                    sample_boxes = bbox_frame[bbox_frame["image_name"].astype(str) == image_name]
-                    if not sample_boxes.empty:
-                        localization_metrics = _compute_bbox_localization_metrics(
-                            heatmap=heatmaps[sample_index],
-                            bbox_rows=sample_boxes,
-                            image_size=image_size,
-                            original_width=float(row.get("original_width", 1024) or 1024),
-                            original_height=float(row.get("original_height", 1024) or 1024),
-                        )
-                        localization_rows.append(
-                            {
-                                "image_name": image_name,
-                                "num_boxes": int(len(sample_boxes)),
-                                **localization_metrics,
-                            }
-                        )
-                saved_heatmaps += 1
+                for sample_index in range(batch_size):
+                    if saved_heatmaps >= args.max_heatmaps:
+                        break
+                    row = batch_frame.iloc[sample_index]
+                    image_name = str(row["image_name"])
+                    output_path = heatmap_dir / f"{saved_heatmaps:03d}_{image_name.replace('/', '_')}.png"
+                    _save_heatmap_overlay(output_path, images[sample_index], heatmaps[sample_index], mean, std)
+                    heatmap_rows.append(
+                        {
+                            "variant_name": variant["name"],
+                            "image_name": image_name,
+                            "artifact_path": str(output_path),
+                            "view_position": row.get("view_position"),
+                        }
+                    )
 
-    localization_summary = {}
-    if localization_rows:
-        localization_summary = {
-            "mean_attention_bbox_iou": float(pd.DataFrame(localization_rows)["attention_bbox_iou"].mean()),
-            "mean_attention_bbox_overlap": float(pd.DataFrame(localization_rows)["attention_bbox_overlap"].mean()),
-            "localization_sample_count": len(localization_rows),
+                    if bbox_frame is not None:
+                        sample_boxes = bbox_frame[bbox_frame["image_name"].astype(str) == image_name]
+                        if not sample_boxes.empty:
+                            localization_metrics = _compute_bbox_localization_metrics(
+                                heatmap=heatmaps[sample_index],
+                                bbox_rows=sample_boxes,
+                                image_size=image_size,
+                                original_width=float(row.get("original_width", 1024) or 1024),
+                                original_height=float(row.get("original_height", 1024) or 1024),
+                                heatmap_percentile=heatmap_percentile,
+                            )
+                            localization_rows.append(
+                                {
+                                    "variant_name": variant["name"],
+                                    "image_name": image_name,
+                                    "num_boxes": int(len(sample_boxes)),
+                                    **localization_metrics,
+                                }
+                            )
+                    saved_heatmaps += 1
+
+        localization_summary: dict[str, float] = {}
+        if localization_rows:
+            localization_frame = pd.DataFrame(localization_rows)
+            localization_summary = {
+                "mean_attention_bbox_iou": float(localization_frame["attention_bbox_iou"].mean()),
+                "mean_attention_bbox_overlap": float(localization_frame["attention_bbox_overlap"].mean()),
+                "localization_sample_count": float(len(localization_rows)),
+            }
+
+        summary = {
+            "experiment_name": experiment_config["experiment_name"],
+            "variant_name": variant["name"],
+            "checkpoint": str(checkpoint_path),
+            "split": split,
+            "resolved_config_path": str(resolved_config_path),
+            "classification_metrics": metrics,
+            "layer_index": layer_index,
+            "head_reduction": head_reduction,
+            "heatmap_percentile": heatmap_percentile,
+            "max_attention_batches": max_attention_batches,
+            "num_heatmaps_generated": saved_heatmaps,
+            "inference_time_sec": inference_time_sec,
+            "peak_gpu_memory_mb": peak_gpu_memory_mb,
+            **localization_summary,
         }
 
-    summary = {
-        "checkpoint": str(REPO_ROOT / args.checkpoint),
-        "split": split,
-        "classification_metrics": metrics,
-        "inference_time_sec": inference_time_sec,
-        "peak_gpu_memory_mb": peak_gpu_memory_mb,
-        "num_heatmaps_generated": saved_heatmaps,
-        **localization_summary,
-    }
-
-    save_json(output_dir / "summary.json", summary)
-    save_rows_csv(output_dir / "per_label_metrics.csv", build_per_label_rows(metrics, label_names))
-    save_rows_csv(output_dir / "heatmaps.csv", heatmap_rows)
-    if localization_rows:
-        save_rows_csv(output_dir / "localization_metrics.csv", localization_rows)
-
-    configure_mlflow(config)
-    run_name = config.get("run", {}).get("name", "vit_baseline") + "_experiment_3"
-    with mlflow.start_run(run_name=run_name):
-        log_params_flat(build_run_params(config, pos_weight_stats))
-        log_label_statistics(pos_weight_stats)
-        mlflow.log_param("experiment_script", "experiment_3_vit_attention_metrics")
-        mlflow.log_param("checkpoint", str(REPO_ROOT / args.checkpoint))
-        mlflow.log_param("split", split)
-        mlflow.log_param("max_heatmaps", args.max_heatmaps)
-        _safe_mlflow_log_metrics({f"{split}_{key}": value for key, value in metrics.items()})
-        _safe_mlflow_log_metrics(
-            {
-                "num_heatmaps_generated": float(saved_heatmaps),
-                "inference_time_sec": inference_time_sec,
-                "peak_gpu_memory_mb": peak_gpu_memory_mb,
-                **{key: float(value) for key, value in localization_summary.items()},
-            }
+        summary_rows.append(
+            build_variant_row(
+                experiment_name=experiment_config["experiment_name"],
+                variant=variant,
+                report=None,
+                resolved_config_path=resolved_config_path,
+                extra={
+                    "checkpoint_path": str(checkpoint_path),
+                    "split": split,
+                    "layer_index": layer_index,
+                    "head_reduction": head_reduction,
+                    "heatmap_percentile": heatmap_percentile,
+                    "max_attention_batches": max_attention_batches,
+                    "num_heatmaps_generated": saved_heatmaps,
+                    "inference_time_sec": inference_time_sec,
+                    "peak_gpu_memory_mb": peak_gpu_memory_mb,
+                    **flatten_nested_metrics("", metrics),
+                    **localization_summary,
+                },
+            )
         )
-        mlflow.log_artifacts(str(heatmap_dir), artifact_path="attention_heatmaps")
-        if localization_rows:
-            mlflow.log_artifact(str(output_dir / "localization_metrics.csv"))
-        mlflow.log_artifact(str(output_dir / "summary.json"))
-        mlflow.log_artifact(str(output_dir / "per_label_metrics.csv"))
+        per_label_rows.extend(
+            build_per_label_rows(
+                metrics,
+                label_names,
+                extra={
+                    "experiment_name": experiment_config["experiment_name"],
+                    "variant_name": variant["name"],
+                    "resolved_config_path": str(resolved_config_path),
+                },
+            )
+        )
 
+        write_summary_json(variant_output_dir / "summary.json", summary)
+        write_summary_csv(variant_output_dir / "per_label_metrics.csv", build_per_label_rows(metrics, label_names))
+        write_summary_csv(variant_output_dir / "heatmaps.csv", heatmap_rows)
+        if localization_rows:
+            write_summary_csv(variant_output_dir / "localization_metrics.csv", localization_rows)
+
+        configure_mlflow(resolved_config)
+        with mlflow.start_run(run_name=resolved_config["run"]["name"]):
+            log_params_flat(build_run_params(resolved_config, pos_weight_stats))
+            log_label_statistics(pos_weight_stats)
+            mlflow.log_param("experiment_script", experiment_config["experiment_name"])
+            mlflow.log_param("variant_name", variant["name"])
+            mlflow.log_param("checkpoint", str(checkpoint_path))
+            mlflow.log_param("resolved_config_path", str(resolved_config_path))
+            mlflow.log_param("layer_index", layer_index)
+            mlflow.log_param("head_reduction", head_reduction)
+            mlflow.log_param("heatmap_percentile", heatmap_percentile)
+            mlflow.log_param("max_attention_batches", max_attention_batches)
+            _safe_mlflow_log_metrics({f"{split}_{key}": value for key, value in metrics.items()})
+            _safe_mlflow_log_metrics(
+                {
+                    "num_heatmaps_generated": float(saved_heatmaps),
+                    "inference_time_sec": inference_time_sec,
+                    "peak_gpu_memory_mb": peak_gpu_memory_mb,
+                    **{key: float(value) for key, value in localization_summary.items()},
+                }
+            )
+            mlflow.log_artifact(str(resolved_config_path))
+            mlflow.log_artifact(str(variant_output_dir / "summary.json"))
+            mlflow.log_artifact(str(variant_output_dir / "per_label_metrics.csv"))
+            mlflow.log_artifacts(str(heatmap_dir), artifact_path="attention_heatmaps")
+            if localization_rows:
+                mlflow.log_artifact(str(variant_output_dir / "localization_metrics.csv"))
+
+    write_summary_csv(output_dir / "summary.csv", summary_rows)
+    write_summary_json(output_dir / "summary.json", summary_rows)
+    write_summary_csv(output_dir / "per_label_metrics.csv", per_label_rows)
     print(f"Saved Experiment 3 outputs to {output_dir}")
 
 
