@@ -359,6 +359,7 @@ def build_train_transform(
     augmentation_config = augmentation_config or {}
 
     augmentation_enabled = bool(augmentation_config.get("enabled", False))
+    allow_horizontal_flip = bool(augmentation_config.get("allow_horizontal_flip", False))
     horizontal_flip_prob = float(augmentation_config.get("horizontal_flip_prob", 0.0))
     rotation_degrees = float(augmentation_config.get("rotation_degrees", 0.0))
     color_jitter_brightness = float(augmentation_config.get("color_jitter_brightness", 0.0))
@@ -368,7 +369,7 @@ def build_train_transform(
         transforms.Resize((image_size, image_size), interpolation=InterpolationMode.BICUBIC)
     ]
     if augmentation_enabled:
-        if horizontal_flip_prob > 0:
+        if allow_horizontal_flip and horizontal_flip_prob > 0:
             transform_steps.append(transforms.RandomHorizontalFlip(p=horizontal_flip_prob))
         if rotation_degrees > 0:
             transform_steps.append(
