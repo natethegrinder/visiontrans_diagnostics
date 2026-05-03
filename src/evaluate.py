@@ -18,6 +18,7 @@ def evaluate_epoch(
     return_outputs: bool = False,
     max_attention_batches: int | None = None,
     max_batches: int | None = None,
+    progress_log_interval: int | None = 50,
 ) -> (
     dict[str, float]
     | tuple[dict[str, float], list[list[torch.Tensor]]]
@@ -30,13 +31,23 @@ def evaluate_epoch(
     epoch_logits: list[torch.Tensor] = []
     epoch_labels: list[torch.Tensor] = []
     epoch_attention: list[list[torch.Tensor]] = []
+    total_batches = len(data_loader)
+    effective_total_batches = min(total_batches, max_batches) if max_batches is not None else total_batches
 
     with torch.inference_mode():
         for batch_index, (images, labels) in enumerate(data_loader):
             if max_batches is not None and batch_index >= max_batches:
                 break
-            images = images.to(device)
-            labels = labels.to(device)
+            if batch_index == 0:
+                print("[Eval] First val batch loaded", flush=True)
+            if progress_log_interval and (
+                batch_index == 0
+                or (batch_index + 1) % progress_log_interval == 0
+                or (batch_index + 1) == effective_total_batches
+            ):
+                print(f"[Eval] Batch {batch_index + 1}/{effective_total_batches}", flush=True)
+            images = images.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
 
             if collect_attention:
                 logits, attn_maps = model(images, return_attention=True)

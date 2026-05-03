@@ -446,6 +446,8 @@ def build_dataloaders(
     num_channels = int(data_config.get("num_channels", 1))
     batch_size = int(training_config.get("batch_size", data_config.get("batch_size", 32)))
     num_workers = int(data_config.get("num_workers", 4))
+    pin_memory = bool(torch.cuda.is_available())
+    persistent_workers = num_workers > 0
     train_transform = build_train_transform(
         image_size=image_size,
         num_channels=num_channels,
@@ -495,7 +497,8 @@ def build_dataloaders(
             batch_size=batch_size,
             shuffle=(split_name == "train"),
             num_workers=num_workers,
-            pin_memory=torch.cuda.is_available(),
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers,
         )
         for split_name, dataset in datasets.items()
     }

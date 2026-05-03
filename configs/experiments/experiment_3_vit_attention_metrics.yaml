@@ -10,6 +10,7 @@ runtime_defaults:
   max_runs:
   max_val_batches:
   max_attention_batches: 5
+  num_workers_override: 0
 
 variants:
   - name: last_layer_mean_top20_pilot

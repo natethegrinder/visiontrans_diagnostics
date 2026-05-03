@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import os
 from typing import Mapping, Sequence
 
 import mlflow
-import os
 
 def configure_mlflow(config: dict) -> None:
     mlflow_config = config.get("mlflow", {})
@@ -20,9 +20,9 @@ def configure_mlflow(config: dict) -> None:
     if experiment_name:
         mlflow.set_experiment(experiment_name)
 
-    print(f"[MLflow] tracking_uri={mlflow.get_tracking_uri()}", flush=True)
+    print(f"[MLflow] Tracking URI: {mlflow.get_tracking_uri()}", flush=True)
     if experiment_name:
-        print(f"[MLflow] experiment_name={experiment_name}", flush=True)
+        print(f"[MLflow] Experiment name: {experiment_name}", flush=True)
 
 
 def log_params_flat(params: Mapping[str, object]) -> None:

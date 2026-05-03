@@ -44,7 +44,7 @@ def _build_threshold_tensor(
             f"Threshold vector must have one value per label: expected {num_labels}, "
             f"got {threshold_tensor.numel()}."
         )
-    return threshold_tensor.view(1, num_labels)
+    return threshold_tensor.reshape(1, num_labels)
 
 
 def tune_multilabel_thresholds(

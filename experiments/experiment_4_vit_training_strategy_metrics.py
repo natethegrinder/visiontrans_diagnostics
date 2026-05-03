@@ -65,6 +65,7 @@ def main() -> None:
             args.max_train_batches if args.max_train_batches is not None else runtime_defaults.get("max_train_batches")
         ),
         "max_val_batches": args.max_val_batches if args.max_val_batches is not None else runtime_defaults.get("max_val_batches"),
+        "num_workers_override": runtime_defaults.get("num_workers_override"),
     }
 
     if args.dry_run:
@@ -84,6 +85,7 @@ def main() -> None:
             epochs_override=runtime_overrides["epochs_override"],
             max_train_batches=runtime_overrides["max_train_batches"],
             max_val_batches=runtime_overrides["max_val_batches"],
+            num_workers_override=runtime_overrides["num_workers_override"],
         )
         resolved_config.setdefault("run", {})
         resolved_config["run"]["name"] = f"{experiment_config['experiment_name']}__{variant['name']}"

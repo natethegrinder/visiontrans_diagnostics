@@ -62,3 +62,8 @@ mlflow:
   tracking_uri: mlruns
   experiment_name: cnn_vs_vit_medical
   log_artifacts: true
+
+runtime:
+  max_train_batches:
+  max_val_batches:
+  progress_log_interval: 50

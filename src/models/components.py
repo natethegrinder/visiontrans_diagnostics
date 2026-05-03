@@ -29,7 +29,7 @@ class PatchEmbedding(nn.Module):
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         patches = self.projection(images)
-        patches = patches.flatten(2).transpose(1, 2)
+        patches = patches.flatten(2).transpose(1, 2).contiguous()
         return patches
 
 
@@ -66,7 +66,7 @@ class ViTInputEmbedding(nn.Module):
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         patch_tokens = self.patch_embed(images)
         batch_size = patch_tokens.size(0)
-        cls_tokens = self.cls_token.expand(batch_size, -1, -1)
-        tokens = torch.cat([cls_tokens, patch_tokens], dim=1)
+        cls_tokens = self.cls_token.repeat(batch_size, 1, 1)
+        tokens = torch.cat([cls_tokens, patch_tokens], dim=1).contiguous()
         tokens = tokens + self.positional_embedding
-        return self.dropout(tokens)
+        return self.dropout(tokens).contiguous()

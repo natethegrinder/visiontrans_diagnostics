@@ -13,6 +13,52 @@ VIT_PRESETS = {
 }
 
 
+class MultiHeadSelfAttention(nn.Module):
+    def __init__(
+        self,
+        hidden_dim: int,
+        num_heads: int,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        if hidden_dim % num_heads != 0:
+            raise ValueError("hidden_dim must be divisible by num_heads")
+
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.head_dim = hidden_dim // num_heads
+        self.scale = self.head_dim ** -0.5
+        self.qkv = nn.Linear(hidden_dim, hidden_dim * 3)
+        self.attention_dropout = nn.Dropout(dropout)
+        self.output_projection = nn.Linear(hidden_dim, hidden_dim)
+        self.output_dropout = nn.Dropout(dropout)
+
+    def forward(
+        self,
+        tokens: torch.Tensor,
+        return_attention: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        batch_size, seq_len, _ = tokens.shape
+        qkv = self.qkv(tokens)
+        qkv = qkv.reshape(batch_size, seq_len, 3, self.num_heads, self.head_dim)
+        qkv = qkv.permute(2, 0, 3, 1, 4).contiguous()
+        queries, keys, values = qkv.unbind(dim=0)
+        queries = queries.contiguous()
+        keys = keys.contiguous()
+        values = values.contiguous()
+
+        keys_t = keys.transpose(-2, -1).contiguous()
+        attention_scores = torch.matmul(queries, keys_t) * self.scale
+        attention_weights = torch.softmax(attention_scores, dim=-1)
+        attention_weights = self.attention_dropout(attention_weights).contiguous()
+        attention_output = torch.matmul(attention_weights, values)
+        attention_output = attention_output.transpose(1, 2).contiguous()
+        attention_output = attention_output.reshape(batch_size, seq_len, self.hidden_dim)
+        attention_output = self.output_projection(attention_output)
+        attention_output = self.output_dropout(attention_output)
+        return attention_output, attention_weights if return_attention else None
+
+
 class TransformerEncoderBlock(nn.Module):
     def __init__(
         self,
@@ -23,13 +69,11 @@ class TransformerEncoderBlock(nn.Module):
     ) -> None:
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_dim)
-        self.attention = nn.MultiheadAttention(
-            embed_dim=hidden_dim,
+        self.attention = MultiHeadSelfAttention(
+            hidden_dim=hidden_dim,
             num_heads=num_heads,
             dropout=dropout,
-            batch_first=True,
         )
-        self.attention_dropout = nn.Dropout(dropout)
         self.norm2 = nn.LayerNorm(hidden_dim)
         self.mlp = nn.Sequential(
             nn.Linear(hidden_dim, dim_feedforward),
@@ -45,16 +89,13 @@ class TransformerEncoderBlock(nn.Module):
         return_attention: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         # tokens: (B, seq_len, hidden_dim)
-        normalized_tokens = self.norm1(tokens)
+        normalized_tokens = self.norm1(tokens).contiguous()
         attention_output, attention_weights = self.attention(
             normalized_tokens,
-            normalized_tokens,
-            normalized_tokens,
-            need_weights=return_attention,
-            average_attn_weights=False,
+            return_attention=return_attention,
         )
-        tokens = tokens + self.attention_dropout(attention_output)
-        tokens = tokens + self.mlp(self.norm2(tokens))
+        tokens = (tokens + attention_output).contiguous()
+        tokens = (tokens + self.mlp(self.norm2(tokens))).contiguous()
         return tokens, attention_weights if return_attention else None
 
 
@@ -144,7 +185,7 @@ class VisionTransformerClassifier(nn.Module):
         # encoded_tokens: (B, num_patches + 1, hidden_dim)
         encoded_tokens, attention_maps = self.encoder(tokens, return_attention=return_attention)
         # cls_token: (B, hidden_dim)
-        cls_token = self.norm(encoded_tokens[:, 0])
+        cls_token = self.norm(encoded_tokens[:, 0, :].contiguous())
         # logits: (B, num_classes)
         logits = self.head(cls_token)
         if return_attention:

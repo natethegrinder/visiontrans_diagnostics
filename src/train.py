@@ -41,9 +41,28 @@ def merge_dicts(base: dict, update: dict) -> dict:
 
 
 def resolve_device(config: dict) -> torch.device:
-    requested = config.get("project", {}).get("device", "auto")
+    requested = str(config.get("project", {}).get("device", "auto")).lower()
+
+    # For experiment runs, prefer CUDA when available. Do not select MPS automatically
+    # because prior local Mac testing hit MPS-specific backward stride/view errors.
     if requested == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        return torch.device("cpu")
+
+    if requested == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "project.device is set to 'cuda', but CUDA is not available. "
+                "Check NVIDIA driver, CUDA-enabled PyTorch install, and GPU visibility."
+            )
+        return torch.device("cuda")
+
+    if requested == "mps":
+        if not torch.backends.mps.is_available():
+            raise RuntimeError("project.device is set to 'mps', but MPS is not available.")
+        return torch.device("mps")
+
     return torch.device(requested)
 
 
@@ -156,18 +175,29 @@ def train_one_epoch(
     threshold: float = 0.5,
     gradient_clip_norm: float | None = None,
     max_batches: int | None = None,
+    progress_log_interval: int | None = 50,
 ) -> dict[str, float]:
     model.train()
     running_loss = 0.0
     sample_count = 0
     epoch_logits: list[torch.Tensor] = []
     epoch_labels: list[torch.Tensor] = []
+    total_batches = len(data_loader)
+    effective_total_batches = min(total_batches, max_batches) if max_batches is not None else total_batches
 
     for batch_index, (images, labels) in enumerate(data_loader):
         if max_batches is not None and batch_index >= max_batches:
             break
-        images = images.to(device)
-        labels = labels.to(device)
+        if batch_index == 0:
+            print("[Train] First train batch loaded", flush=True)
+        if progress_log_interval and (
+            batch_index == 0
+            or (batch_index + 1) % progress_log_interval == 0
+            or (batch_index + 1) == effective_total_batches
+        ):
+            print(f"[Train] Batch {batch_index + 1}/{effective_total_batches}", flush=True)
+        images = images.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
 
         optimizer.zero_grad()
         logits = model(images)
@@ -252,16 +282,36 @@ def train_model(
     nested_run: bool = False,
 ) -> dict[str, object]:
     seed = int(config.get("project", {}).get("seed", 42))
+    print(f"[Setup] Seed: {seed}", flush=True)
     set_seed(seed)
     device = resolve_device(config)
+    print(f"[Setup] Device: {device}", flush=True)
+    if device.type == "cuda":
+        print(f"[Setup] CUDA device name: {torch.cuda.get_device_name(0)}", flush=True)
+        print(f"[Setup] CUDA device count: {torch.cuda.device_count()}", flush=True)
+        total_memory_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+        print(f"[Setup] CUDA total memory: {total_memory_gb:.2f} GB", flush=True)
+    print("[Data] Building NIH data module...", flush=True)
     data_module = build_nih_data_module(config)
+    print("[Data] Built NIH data module", flush=True)
     label_names = list(data_module["labels"])
+    print(f"[Data] Labels: {len(label_names)} -> {label_names}", flush=True)
+    print(f"[Data] Train batches: {len(data_module['dataloaders']['train'])}", flush=True)
+    print(f"[Data] Val batches: {len(data_module['dataloaders']['val'])}", flush=True)
 
+    print("[Model] Building model...", flush=True)
     model = build_model(config).to(device)
+    print(f"[Model] Built model: {model.__class__.__name__}", flush=True)
+    total_params = sum(parameter.numel() for parameter in model.parameters())
+    trainable_params = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+    print(f"[Model] Total params: {total_params:,}", flush=True)
+    print(f"[Model] Trainable params: {trainable_params:,}", flush=True)
     pos_weight_stats = data_module["pos_weight_stats"]
     use_pos_weight = bool(config.get("training", {}).get("use_pos_weight", True))
     pos_weight_tensor = pos_weight_stats["pos_weight_tensor"].to(device) if use_pos_weight else None
+    print("[Loss] Building loss function...", flush=True)
     loss_fn = build_loss_function(config, pos_weight=pos_weight_tensor)
+    print("[Optim] Building optimizer and scheduler...", flush=True)
     optimizer = build_optimizer(config, model)
     scheduler = build_scheduler(config, optimizer)
     initialize_scheduler_learning_rate(config, optimizer, scheduler)
@@ -277,9 +327,13 @@ def train_model(
     max_val_batches = runtime_config.get("max_val_batches")
     max_train_batches = int(max_train_batches) if max_train_batches is not None else None
     max_val_batches = int(max_val_batches) if max_val_batches is not None else None
+    progress_log_interval = runtime_config.get("progress_log_interval", 50)
+    progress_log_interval = int(progress_log_interval) if progress_log_interval is not None else None
 
     configure_mlflow(config)
     effective_run_name = run_name or config.get("run", {}).get("name")
+    print(f"[MLflow] Tracking URI: {mlflow.get_tracking_uri()}", flush=True)
+    print(f"[MLflow] Run name: {effective_run_name}", flush=True)
     best_auc = float("-inf")
     best_macro_f1 = float("-inf")
     summary_metrics: dict[str, float] = {}
@@ -293,15 +347,19 @@ def train_model(
 
     train_start_time = time.perf_counter()
     with mlflow.start_run(run_name=effective_run_name, nested=nested_run) as run:
+        print(f"[MLflow] Started run: {run.info.run_id}", flush=True)
+        print("[Train] Starting training loop", flush=True)
         log_params_flat(build_run_params(config, pos_weight_stats))
         log_label_statistics(pos_weight_stats)
         mlflow.log_dict(config, "config_resolved.json")
 
         for epoch in range(epochs):
+            print(f"[Train] Epoch {epoch + 1}/{epochs} started", flush=True)
             if device.type == "cuda":
                 torch.cuda.reset_peak_memory_stats(device)
 
             epoch_start = time.perf_counter()
+            print(f"[Train] Running train epoch {epoch + 1}/{epochs}", flush=True)
             train_metrics = train_one_epoch(
                 model=model,
                 data_loader=data_module["dataloaders"]["train"],
@@ -312,7 +370,9 @@ def train_model(
                 threshold=threshold,
                 gradient_clip_norm=gradient_clip_norm,
                 max_batches=max_train_batches,
+                progress_log_interval=progress_log_interval,
             )
+            print(f"[Eval] Running validation epoch {epoch + 1}/{epochs}", flush=True)
             val_metrics = evaluate_epoch(
                 model=model,
                 data_loader=data_module["dataloaders"]["val"],
@@ -322,6 +382,7 @@ def train_model(
                 threshold=threshold,
                 return_outputs=tune_thresholds,
                 max_batches=max_val_batches,
+                progress_log_interval=progress_log_interval,
             )
 
             if tune_thresholds:
@@ -392,6 +453,10 @@ def train_model(
                 save_checkpoint(checkpoint_state, best_auc_path)
                 mlflow.log_metric("best_val_mean_auc", best_auc)
                 mlflow.log_metric("best_val_mean_auc_epoch", epoch)
+                print(
+                    f"[Checkpoint] New best val mean AUC: {best_auc:.4f}; saved to {best_auc_path}",
+                    flush=True,
+                )
 
             if val_metrics["macro_f1"] > best_macro_f1:
                 best_macro_f1 = val_metrics["macro_f1"]
@@ -399,6 +464,10 @@ def train_model(
                 save_checkpoint(checkpoint_state, best_macro_f1_path)
                 mlflow.log_metric("best_val_macro_f1", best_macro_f1)
                 mlflow.log_metric("best_val_macro_f1_epoch", epoch)
+                print(
+                    f"[Checkpoint] New best val macro F1: {best_macro_f1:.4f}; saved to {best_macro_f1_path}",
+                    flush=True,
+                )
 
             summary_metrics = {
                 "train_loss": train_metrics["loss"],
@@ -421,8 +490,20 @@ def train_model(
                     "tuned_thresholds": dict(latest_tuned_thresholds) if latest_tuned_thresholds is not None else None,
                 }
             )
+            print(
+                f"[Epoch {epoch + 1}/{epochs}] "
+                f"train_loss={train_metrics['loss']:.4f} "
+                f"val_loss={val_metrics['loss']:.4f} "
+                f"val_mean_auc={val_metrics['mean_auc']:.4f} "
+                f"val_macro_f1={val_metrics['macro_f1']:.4f} "
+                f"time_sec={epoch_time_sec:.1f}",
+                flush=True,
+            )
 
     total_runtime_sec = time.perf_counter() - train_start_time
+    print(f"[Train] Finished training in {total_runtime_sec:.1f} sec", flush=True)
+    print(f"[Train] Best mean AUC: {best_auc:.4f} at epoch {best_auc_epoch}", flush=True)
+    print(f"[Train] Best macro F1: {best_macro_f1:.4f} at epoch {best_macro_f1_epoch}", flush=True)
     return {
         "run_id": run.info.run_id,
         "summary_metrics": summary_metrics,

@@ -11,6 +11,7 @@ runtime_defaults:
   max_runs:
   max_train_batches:
   max_val_batches:
+  num_workers_override: 0
 
 variants:
   - name: vit_tiny_6l_192d_p16_pilot

@@ -50,7 +50,7 @@ def cls_attention_to_patch_grid(
         raise ValueError(f"Unsupported head_reduction '{head_reduction}'. Expected 'mean' or 'max'.")
 
     # reduced_attention: (B, num_patches) -> patch_grid: (B, grid_size, grid_size)
-    return reduced_attention.view(cls_attention.size(0), grid_size, grid_size)
+    return reduced_attention.reshape(cls_attention.size(0), grid_size, grid_size)
 
 
 def upsample_patch_attention(

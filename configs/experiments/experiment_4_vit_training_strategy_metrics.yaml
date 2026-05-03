@@ -10,6 +10,7 @@ runtime_defaults:
   max_runs:
   max_train_batches:
   max_val_batches:
+  num_workers_override: 0
 
 variants:
   - name: warmup_cosine_5ep_clip1_pilot
