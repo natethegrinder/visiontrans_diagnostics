@@ -144,6 +144,7 @@ class DataPreparationTests(unittest.TestCase):
             num_channels=1,
             augmentation_config={
                 "enabled": True,
+                "allow_horizontal_flip": True,
                 "horizontal_flip_prob": 0.5,
                 "rotation_degrees": 10,
                 "color_jitter_brightness": 0.2,
@@ -162,6 +163,23 @@ class DataPreparationTests(unittest.TestCase):
         self.assertEqual(
             eval_transform_names,
             ["Resize", "ToTensor", "Normalize"],
+        )
+
+    def test_horizontal_flip_requires_explicit_allow_flag(self) -> None:
+        train_transform = build_train_transform(
+            image_size=224,
+            num_channels=1,
+            augmentation_config={
+                "enabled": True,
+                "allow_horizontal_flip": False,
+                "horizontal_flip_prob": 0.5,
+                "rotation_degrees": 10,
+            },
+        )
+        train_transform_names = [type(step).__name__ for step in train_transform.transforms]
+        self.assertEqual(
+            train_transform_names,
+            ["Resize", "RandomRotation", "ToTensor", "Normalize"],
         )
 
 
