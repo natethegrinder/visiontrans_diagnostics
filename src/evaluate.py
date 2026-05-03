@@ -13,9 +13,16 @@ def evaluate_epoch(
     loss_fn: torch.nn.Module,
     device: torch.device,
     label_names: Sequence[str],
-    threshold: float = 0.5,
+    threshold: float | Sequence[float] | torch.Tensor = 0.5,
     collect_attention: bool = False,
-) -> dict[str, float] | tuple[dict[str, float], list[list[torch.Tensor]]]:
+    return_outputs: bool = False,
+    max_attention_batches: int | None = None,
+) -> (
+    dict[str, float]
+    | tuple[dict[str, float], list[list[torch.Tensor]]]
+    | tuple[dict[str, float], torch.Tensor, torch.Tensor]
+    | tuple[dict[str, float], list[list[torch.Tensor]], torch.Tensor, torch.Tensor]
+):
     model.eval()
     running_loss = 0.0
     sample_count = 0
@@ -23,14 +30,15 @@ def evaluate_epoch(
     epoch_labels: list[torch.Tensor] = []
     epoch_attention: list[list[torch.Tensor]] = []
 
-    with torch.no_grad():
-        for images, labels in data_loader:
+    with torch.inference_mode():
+        for batch_index, (images, labels) in enumerate(data_loader):
             images = images.to(device)
             labels = labels.to(device)
 
             if collect_attention:
                 logits, attn_maps = model(images, return_attention=True)
-                epoch_attention.append([attention.detach().cpu() for attention in attn_maps])
+                if max_attention_batches is None or batch_index < max_attention_batches:
+                    epoch_attention.append([attention.detach().cpu() for attention in attn_maps])
             else:
                 logits = model(images)
             loss = loss_fn(logits, labels)
@@ -45,6 +53,10 @@ def evaluate_epoch(
     stacked_labels = torch.cat(epoch_labels, dim=0)
     metrics = compute_multilabel_metrics(stacked_logits, stacked_labels, label_names, threshold=threshold)
     metrics["loss"] = running_loss / max(sample_count, 1)
+    if collect_attention and return_outputs:
+        return metrics, epoch_attention, stacked_logits, stacked_labels
     if collect_attention:
         return metrics, epoch_attention
+    if return_outputs:
+        return metrics, stacked_logits, stacked_labels
     return metrics
