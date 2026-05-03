@@ -1,0 +1,79 @@
+experiment_name: experiment_4_vit_training_strategy_metrics
+description: >
+  Pilot-first comparison of scratch ViT training strategies. Run the pilot
+  variant first; use coarse-grid screening only if epoch times are acceptable.
+default_output_dir: artifacts/experiments/experiment_4
+default_pilot_variant: warmup_cosine_5ep_clip1_pilot
+
+runtime_defaults:
+  epochs_override: 3
+  max_runs:
+  max_train_batches:
+  max_val_batches:
+
+variants:
+  - name: warmup_cosine_5ep_clip1_pilot
+    intent: Short pilot to verify warmup cosine scheduling and gradient clipping.
+    overrides:
+      training.scheduler: warmup_cosine
+      training.warmup_epochs: 5
+      training.gradient_clip_norm: 1.0
+      training.learning_rate: 0.0001
+      training.weight_decay: 0.0001
+      training.loss: bce_with_logits
+      training.use_pos_weight: true
+
+  - name: cosine_no_warmup
+    intent: Baseline cosine schedule without warmup or clipping.
+    overrides:
+      training.scheduler: cosine
+      training.warmup_epochs: 0
+      training.gradient_clip_norm: null
+      training.weight_decay: 0.0001
+
+  - name: warmup_cosine_3ep
+    intent: Warmup cosine with shorter warmup.
+    overrides:
+      training.scheduler: warmup_cosine
+      training.warmup_epochs: 3
+      training.gradient_clip_norm: null
+      training.weight_decay: 0.0001
+
+  - name: warmup_cosine_5ep
+    intent: Warmup cosine with five warmup epochs and no clipping.
+    overrides:
+      training.scheduler: warmup_cosine
+      training.warmup_epochs: 5
+      training.gradient_clip_norm: null
+      training.weight_decay: 0.0001
+
+  - name: warmup_cosine_5ep_clip1
+    intent: Warmup cosine with gradient clipping at 1.0.
+    overrides:
+      training.scheduler: warmup_cosine
+      training.warmup_epochs: 5
+      training.gradient_clip_norm: 1.0
+      training.weight_decay: 0.0001
+
+  - name: warmup_cosine_5ep_clip1_wd5e4
+    intent: Warmup cosine with clipping and stronger weight decay.
+    overrides:
+      training.scheduler: warmup_cosine
+      training.warmup_epochs: 5
+      training.gradient_clip_norm: 1.0
+      training.weight_decay: 0.0005
+
+  - name: lr_5e5
+    intent: Optional learning-rate screening at 5e-5.
+    overrides:
+      training.learning_rate: 0.00005
+
+  - name: lr_1e4
+    intent: Optional learning-rate screening at 1e-4.
+    overrides:
+      training.learning_rate: 0.0001
+
+  - name: lr_3e4
+    intent: Optional learning-rate screening at 3e-4.
+    overrides:
+      training.learning_rate: 0.0003

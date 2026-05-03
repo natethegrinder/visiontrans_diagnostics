@@ -1,0 +1,72 @@
+experiment_name: experiment_5_vit_loss_metrics
+description: >
+  Pilot-first comparison of class-imbalance-aware loss functions for the
+  scratch ViT baseline. Run the pilot before any coarse-grid focal tuning.
+default_output_dir: artifacts/experiments/experiment_5
+default_pilot_variant: bce_pos_weight_clamp50_pilot
+
+runtime_defaults:
+  epochs_override: 3
+  max_runs:
+  max_train_batches:
+  max_val_batches:
+
+variants:
+  - name: bce_pos_weight_clamp50_pilot
+    intent: Short pilot for BCEWithLogitsLoss with clamped pos_weight.
+    overrides:
+      training.loss: bce_with_logits
+      training.use_pos_weight: true
+      data.pos_weight_clamp: 50
+      training.learning_rate: 0.0001
+      training.scheduler: warmup_cosine
+      training.warmup_epochs: 5
+      training.gradient_clip_norm: 1.0
+
+  - name: bce_pos_weight_clamp50
+    intent: BCEWithLogitsLoss with clamped pos_weight.
+    overrides:
+      training.loss: bce_with_logits
+      training.use_pos_weight: true
+      data.pos_weight_clamp: 50
+
+  - name: focal_g2_a025
+    intent: Sigmoid focal loss with gamma 2.0 and alpha 0.25.
+    overrides:
+      training.loss: focal
+      training.use_pos_weight: false
+      training.focal_gamma: 2.0
+      training.focal_alpha: 0.25
+
+  - name: focal_pos_weight_g2_a025
+    intent: Sigmoid focal loss with clamped pos_weight.
+    overrides:
+      training.loss: focal_with_pos_weight
+      training.use_pos_weight: true
+      data.pos_weight_clamp: 50
+      training.focal_gamma: 2.0
+      training.focal_alpha: 0.25
+
+  - name: focal_g1_a025
+    intent: Optional focal screening with gamma 1.0.
+    overrides:
+      training.loss: focal
+      training.use_pos_weight: false
+      training.focal_gamma: 1.0
+      training.focal_alpha: 0.25
+
+  - name: focal_g3_a025
+    intent: Optional focal screening with gamma 3.0.
+    overrides:
+      training.loss: focal
+      training.use_pos_weight: false
+      training.focal_gamma: 3.0
+      training.focal_alpha: 0.25
+
+  - name: focal_g2_a05
+    intent: Optional focal screening with alpha 0.5.
+    overrides:
+      training.loss: focal
+      training.use_pos_weight: false
+      training.focal_gamma: 2.0
+      training.focal_alpha: 0.5

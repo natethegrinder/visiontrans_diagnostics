@@ -1,0 +1,45 @@
+experiment_name: experiment_3_vit_attention_metrics
+description: >
+  Eval-only attention inspection for the scratch ViT baseline. Keep collection
+  small by default because full-validation attention extraction can be slow and
+  memory-heavy.
+default_output_dir: artifacts/experiments/experiment_3
+default_pilot_variant: last_layer_mean_top20_pilot
+
+runtime_defaults:
+  max_runs:
+  max_val_batches:
+  max_attention_batches: 5
+
+variants:
+  - name: last_layer_mean_top20_pilot
+    intent: Short attention pilot using the last layer with mean head reduction.
+    overrides:
+      interpretability.layer_index: -1
+      interpretability.head_reduction: mean
+      interpretability.heatmap_percentile: 80
+      interpretability.max_attention_batches: 5
+
+  - name: last_layer_mean_top20
+    intent: Last-layer mean-head attention with top-20 percent activation mask.
+    overrides:
+      interpretability.layer_index: -1
+      interpretability.head_reduction: mean
+      interpretability.heatmap_percentile: 80
+      interpretability.max_attention_batches: 5
+
+  - name: last_layer_max_top20
+    intent: Last-layer max-head attention with top-20 percent activation mask.
+    overrides:
+      interpretability.layer_index: -1
+      interpretability.head_reduction: max
+      interpretability.heatmap_percentile: 80
+      interpretability.max_attention_batches: 5
+
+  - name: middle_layer_mean_top20
+    intent: Middle-layer mean-head attention with top-20 percent activation mask.
+    overrides:
+      interpretability.layer_index: middle
+      interpretability.head_reduction: mean
+      interpretability.heatmap_percentile: 80
+      interpretability.max_attention_batches: 5
