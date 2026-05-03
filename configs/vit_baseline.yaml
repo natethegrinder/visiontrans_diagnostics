@@ -21,3 +21,7 @@ training:
   batch_size: 16
   scheduler: warmup_cosine
   warmup_epochs: 5
+
+mlflow:
+  tracking_uri: "http://127.0.0.1:5050"
+  experiment_name: "cnn_vs_vit_medical"
