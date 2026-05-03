@@ -21,6 +21,8 @@ data:
   pos_weight_clamp: 50
   augmentation:
     enabled: false
+    # Chest X-rays are laterality-sensitive, so keep flips opt-in.
+    allow_horizontal_flip: false
     horizontal_flip_prob: 0.5
     rotation_degrees: 10
     color_jitter_brightness: 0.2
@@ -40,7 +42,11 @@ training:
   focal_gamma: 2.0
   focal_alpha: 0.25
   scheduler: cosine
+  warmup_epochs: 0
   threshold: 0.5
+  tune_thresholds: false
+  threshold_tuning_objective: f1
+  threshold_grid:
   gradient_clip_norm:
   checkpoint_dir: artifacts/models
   early_stopping_patience: 5
