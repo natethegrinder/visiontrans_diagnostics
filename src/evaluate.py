@@ -17,6 +17,7 @@ def evaluate_epoch(
     collect_attention: bool = False,
     return_outputs: bool = False,
     max_attention_batches: int | None = None,
+    max_batches: int | None = None,
 ) -> (
     dict[str, float]
     | tuple[dict[str, float], list[list[torch.Tensor]]]
@@ -32,6 +33,8 @@ def evaluate_epoch(
 
     with torch.inference_mode():
         for batch_index, (images, labels) in enumerate(data_loader):
+            if max_batches is not None and batch_index >= max_batches:
+                break
             images = images.to(device)
             labels = labels.to(device)
 
