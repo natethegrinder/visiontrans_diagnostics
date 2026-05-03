@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import time
 from pathlib import Path
@@ -15,8 +16,8 @@ from data import build_nih_data_module
 from evaluate import evaluate_epoch
 from losses import build_loss_function
 from mlflow_utils import configure_mlflow, log_epoch_metrics, log_label_statistics, log_params_flat
+from metrics import compute_multilabel_metrics, tune_multilabel_thresholds
 from models import build_model
-from metrics import compute_multilabel_metrics
 
 
 def load_config(config_path: str | Path) -> dict:
@@ -85,11 +86,58 @@ def build_scheduler(config: dict, optimizer: torch.optim.Optimizer) -> torch.opt
     if scheduler_name == "cosine":
         epochs = int(training_config.get("epochs", 30))
         return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    if scheduler_name == "warmup_cosine":
+        epochs = int(training_config.get("epochs", 30))
+        warmup_epochs = int(training_config.get("warmup_epochs", 0))
+
+        def lr_lambda(epoch_index: int) -> float:
+            if warmup_epochs > 0 and epoch_index < warmup_epochs:
+                return float(epoch_index + 1) / float(warmup_epochs)
+            progress = float(epoch_index - warmup_epochs) / float(max(1, epochs - warmup_epochs))
+            progress = min(max(progress, 0.0), 1.0)
+            return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+        return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
     if scheduler_name == "step":
         step_size = int(training_config.get("step_size", 10))
         gamma = float(training_config.get("gamma", 0.1))
         return torch.optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
     raise ValueError(f"Unsupported scheduler '{scheduler_name}'.")
+
+
+def initialize_scheduler_learning_rate(
+    config: dict,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler | None,
+) -> None:
+    if scheduler is None:
+        return
+
+    scheduler_name = str(config.get("training", {}).get("scheduler", "none")).lower()
+    if scheduler_name != "warmup_cosine":
+        return
+
+    warmup_epochs = int(config.get("training", {}).get("warmup_epochs", 0))
+    if warmup_epochs > 0:
+        scale = 1.0 / float(warmup_epochs)
+    else:
+        scale = 1.0
+
+    for param_group, base_lr in zip(optimizer.param_groups, scheduler.base_lrs):
+        param_group["lr"] = float(base_lr) * scale
+    scheduler.last_epoch = 0
+    scheduler._last_lr = [group["lr"] for group in optimizer.param_groups]
+
+
+def step_scheduler(
+    config: dict,
+    scheduler: torch.optim.lr_scheduler.LRScheduler | None,
+    epoch: int,
+) -> None:
+    if scheduler is None:
+        return
+
+    scheduler.step()
 
 
 def _peak_gpu_memory_mb(device: torch.device) -> float:
@@ -171,9 +219,13 @@ def build_run_params(config: dict, pos_weight_stats: dict) -> dict[str, object]:
         "use_pos_weight": training_config.get("use_pos_weight", True),
         "pos_weight_clamp": data_config.get("pos_weight_clamp", 50),
         "threshold": training_config.get("threshold", 0.5),
+        "tune_thresholds": training_config.get("tune_thresholds", False),
+        "threshold_tuning_objective": training_config.get("threshold_tuning_objective", "f1"),
+        "threshold_grid": training_config.get("threshold_grid"),
         "seed": config.get("project", {}).get("seed", 42),
         "augmentation_enabled": augmentation_config.get("enabled", False),
         "horizontal_flip_prob": augmentation_config.get("horizontal_flip_prob", 0.0),
+        "allow_horizontal_flip": augmentation_config.get("allow_horizontal_flip", False),
         "rotation_degrees": augmentation_config.get("rotation_degrees", 0.0),
         "crop_type": augmentation_config.get("crop_type", "none"),
         "crop_scale": augmentation_config.get("crop_scale"),
@@ -188,7 +240,11 @@ def save_checkpoint(state: dict, output_path: str | Path) -> None:
     torch.save(state, output_path)
 
 
-def train(config: dict) -> dict[str, float]:
+def train_model(
+    config: dict,
+    run_name: str | None = None,
+    nested_run: bool = False,
+) -> dict[str, object]:
     seed = int(config.get("project", {}).get("seed", 42))
     set_seed(seed)
     device = resolve_device(config)
@@ -202,18 +258,29 @@ def train(config: dict) -> dict[str, float]:
     loss_fn = build_loss_function(config, pos_weight=pos_weight_tensor)
     optimizer = build_optimizer(config, model)
     scheduler = build_scheduler(config, optimizer)
+    initialize_scheduler_learning_rate(config, optimizer, scheduler)
     threshold = float(config.get("training", {}).get("threshold", 0.5))
     gradient_clip_norm = config.get("training", {}).get("gradient_clip_norm")
     gradient_clip_norm = float(gradient_clip_norm) if gradient_clip_norm is not None else None
     epochs = int(config.get("training", {}).get("epochs", 30))
+    tune_thresholds = bool(config.get("training", {}).get("tune_thresholds", False))
+    threshold_tuning_objective = str(config.get("training", {}).get("threshold_tuning_objective", "f1"))
+    threshold_grid = config.get("training", {}).get("threshold_grid")
 
     configure_mlflow(config)
-    run_name = config.get("run", {}).get("name")
+    effective_run_name = run_name or config.get("run", {}).get("name")
     best_auc = float("-inf")
     best_macro_f1 = float("-inf")
     summary_metrics: dict[str, float] = {}
+    latest_tuned_thresholds: dict[str, float] | None = None
+    best_auc_epoch: int | None = None
+    best_macro_f1_epoch: int | None = None
+    history: list[dict[str, object]] = []
+    checkpoint_dir = Path(config.get("training", {}).get("checkpoint_dir", "artifacts/models"))
+    best_auc_path = checkpoint_dir / "vit_best_auc.pt"
+    best_macro_f1_path = checkpoint_dir / "vit_best_macro_f1.pt"
 
-    with mlflow.start_run(run_name=run_name):
+    with mlflow.start_run(run_name=effective_run_name, nested=nested_run) as run:
         log_params_flat(build_run_params(config, pos_weight_stats))
         log_label_statistics(pos_weight_stats)
         mlflow.log_dict(config, "config_resolved.json")
@@ -240,10 +307,34 @@ def train(config: dict) -> dict[str, float]:
                 device=device,
                 label_names=label_names,
                 threshold=threshold,
+                return_outputs=tune_thresholds,
             )
 
-            if scheduler is not None:
-                scheduler.step()
+            if tune_thresholds:
+                val_metrics, val_logits, val_labels = val_metrics
+                tuning_result = tune_multilabel_thresholds(
+                    logits=val_logits,
+                    labels=val_labels,
+                    label_names=label_names,
+                    thresholds=threshold_grid,
+                    objective=threshold_tuning_objective,
+                )
+                tuned_threshold_tensor = tuning_result["threshold_tensor"]
+                latest_tuned_thresholds = dict(tuning_result["thresholds_by_label"])
+                tuned_val_metrics = compute_multilabel_metrics(
+                    val_logits,
+                    val_labels,
+                    label_names,
+                    threshold=tuned_threshold_tensor,
+                )
+                tuned_val_metrics["loss"] = val_metrics["loss"]
+                tuned_val_metrics["learning_rate"] = float(optimizer.param_groups[0]["lr"])
+                tuned_val_metrics["epoch_time_sec"] = 0.0
+                tuned_val_metrics["peak_gpu_memory_mb"] = 0.0
+            else:
+                tuned_val_metrics = None
+
+            step_scheduler(config, scheduler, epoch)
 
             epoch_time_sec = time.perf_counter() - epoch_start
             learning_rate = float(optimizer.param_groups[0]["lr"])
@@ -255,9 +346,17 @@ def train(config: dict) -> dict[str, float]:
             val_metrics["learning_rate"] = learning_rate
             val_metrics["epoch_time_sec"] = epoch_time_sec
             val_metrics["peak_gpu_memory_mb"] = peak_gpu_memory_mb
+            if tuned_val_metrics is not None:
+                tuned_val_metrics["learning_rate"] = learning_rate
+                tuned_val_metrics["epoch_time_sec"] = epoch_time_sec
+                tuned_val_metrics["peak_gpu_memory_mb"] = peak_gpu_memory_mb
 
             log_epoch_metrics(train_metrics, split="train", epoch=epoch)
             log_epoch_metrics(val_metrics, split="val", epoch=epoch)
+            if tuned_val_metrics is not None:
+                log_epoch_metrics(tuned_val_metrics, split="val_tuned", epoch=epoch)
+                for label_name, tuned_threshold in latest_tuned_thresholds.items():
+                    mlflow.log_metric(f"threshold_{label_name}", float(tuned_threshold), step=epoch)
 
             checkpoint_dir = config.get("training", {}).get("checkpoint_dir", "artifacts/models")
             checkpoint_state = {
@@ -266,17 +365,24 @@ def train(config: dict) -> dict[str, float]:
                 "optimizer_state_dict": optimizer.state_dict(),
                 "config": config,
                 "val_metrics": val_metrics,
+                "pos_weight_stats": pos_weight_stats,
             }
+            if scheduler is not None:
+                checkpoint_state["scheduler_state_dict"] = scheduler.state_dict()
+            if latest_tuned_thresholds is not None:
+                checkpoint_state["tuned_thresholds"] = latest_tuned_thresholds
 
             if val_metrics["mean_auc"] > best_auc:
                 best_auc = val_metrics["mean_auc"]
-                save_checkpoint(checkpoint_state, Path(checkpoint_dir) / "vit_best_auc.pt")
+                best_auc_epoch = epoch
+                save_checkpoint(checkpoint_state, best_auc_path)
                 mlflow.log_metric("best_val_mean_auc", best_auc)
                 mlflow.log_metric("best_val_mean_auc_epoch", epoch)
 
             if val_metrics["macro_f1"] > best_macro_f1:
                 best_macro_f1 = val_metrics["macro_f1"]
-                save_checkpoint(checkpoint_state, Path(checkpoint_dir) / "vit_best_macro_f1.pt")
+                best_macro_f1_epoch = epoch
+                save_checkpoint(checkpoint_state, best_macro_f1_path)
                 mlflow.log_metric("best_val_macro_f1", best_macro_f1)
                 mlflow.log_metric("best_val_macro_f1_epoch", epoch)
 
@@ -288,12 +394,44 @@ def train(config: dict) -> dict[str, float]:
                 "train_macro_f1": train_metrics["macro_f1"],
                 "val_macro_f1": val_metrics["macro_f1"],
             }
+            if tuned_val_metrics is not None:
+                summary_metrics["val_tuned_macro_f1"] = tuned_val_metrics["macro_f1"]
+                summary_metrics["val_tuned_mean_average_precision"] = tuned_val_metrics["mean_average_precision"]
 
-    return summary_metrics
+            history.append(
+                {
+                    "epoch": epoch,
+                    "train_metrics": dict(train_metrics),
+                    "val_metrics": dict(val_metrics),
+                    "val_tuned_metrics": dict(tuned_val_metrics) if tuned_val_metrics is not None else None,
+                    "tuned_thresholds": dict(latest_tuned_thresholds) if latest_tuned_thresholds is not None else None,
+                }
+            )
+
+    return {
+        "run_id": run.info.run_id,
+        "summary_metrics": summary_metrics,
+        "history": history,
+        "label_names": label_names,
+        "best_auc": best_auc,
+        "best_auc_epoch": best_auc_epoch,
+        "best_macro_f1": best_macro_f1,
+        "best_macro_f1_epoch": best_macro_f1_epoch,
+        "best_auc_checkpoint": str(best_auc_path),
+        "best_macro_f1_checkpoint": str(best_macro_f1_path),
+        "device": str(device),
+        "pos_weight_stats": pos_weight_stats,
+        "config": config,
+    }
+
+
+def train(config: dict) -> dict[str, float]:
+    report = train_model(config)
+    return dict(report["summary_metrics"])
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Train ViT/CNN baselines on NIH Chest X-ray manifests.")
+    parser = argparse.ArgumentParser(description="Train the ViT baseline on NIH Chest X-ray manifests.")
     parser.add_argument("--config", default="configs/vit_baseline.yaml", help="Path to YAML config.")
     return parser
 
