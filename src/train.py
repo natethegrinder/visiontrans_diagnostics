@@ -300,6 +300,7 @@ def evaluate_best_checkpoint_on_test_split(
     threshold: float | torch.Tensor = 0.5,
     max_batches: int | None = None,
     progress_log_interval: int | None = 50,
+    use_amp: bool = False,
 ) -> dict[str, object]:
     dataloaders = data_module.get("dataloaders", {})
     test_loader = dataloaders.get("test") if isinstance(dataloaders, dict) else None
@@ -323,6 +324,7 @@ def evaluate_best_checkpoint_on_test_split(
         threshold=threshold,
         max_batches=max_batches,
         progress_log_interval=progress_log_interval,
+        use_amp=use_amp,
     )
     return {
         "skipped": False,
