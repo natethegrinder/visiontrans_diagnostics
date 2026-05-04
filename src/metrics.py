@@ -26,6 +26,21 @@ def _nanmean_or_nan(values: Sequence[float]) -> float:
     return float(np.nanmean(array))
 
 
+def _confusion_counts(true_column: np.ndarray, pred_column: np.ndarray) -> dict[str, int]:
+    true_binary = true_column.astype(bool)
+    pred_binary = pred_column.astype(bool)
+    true_positive = int(np.logical_and(true_binary, pred_binary).sum())
+    false_positive = int(np.logical_and(~true_binary, pred_binary).sum())
+    true_negative = int(np.logical_and(~true_binary, ~pred_binary).sum())
+    false_negative = int(np.logical_and(true_binary, ~pred_binary).sum())
+    return {
+        "true_positive": true_positive,
+        "false_positive": false_positive,
+        "true_negative": true_negative,
+        "false_negative": false_negative,
+    }
+
+
 def _build_threshold_tensor(
     threshold: float | Sequence[float] | torch.Tensor,
     num_labels: int,
@@ -115,6 +130,10 @@ def compute_multilabel_metrics(
     metrics: dict[str, float] = {}
     per_label_auc: list[float] = []
     per_label_average_precision: list[float] = []
+    total_true_positive = 0
+    total_false_positive = 0
+    total_true_negative = 0
+    total_false_negative = 0
 
     for index, label_name in enumerate(label_names):
         true_column = y_true[:, index]
@@ -145,6 +164,15 @@ def compute_multilabel_metrics(
             recall_score(true_column, pred_column, zero_division=0)
         )
         metrics[f"binary_accuracy_{label_name}"] = float(np.mean(true_column == pred_column))
+        confusion = _confusion_counts(true_column, pred_column)
+        metrics[f"true_positive_{label_name}"] = confusion["true_positive"]
+        metrics[f"false_positive_{label_name}"] = confusion["false_positive"]
+        metrics[f"true_negative_{label_name}"] = confusion["true_negative"]
+        metrics[f"false_negative_{label_name}"] = confusion["false_negative"]
+        total_true_positive += confusion["true_positive"]
+        total_false_positive += confusion["false_positive"]
+        total_true_negative += confusion["true_negative"]
+        total_false_negative += confusion["false_negative"]
 
     metrics["mean_auc"] = _nanmean_or_nan(per_label_auc)
     metrics["mean_average_precision"] = _nanmean_or_nan(per_label_average_precision)
@@ -165,4 +193,8 @@ def compute_multilabel_metrics(
     metrics["exact_match_accuracy"] = float(np.all(y_true == y_pred, axis=1).mean())
     per_label_binary_accuracy = [metrics[f"binary_accuracy_{label_name}"] for label_name in label_names]
     metrics["mean_binary_accuracy"] = float(np.mean(per_label_binary_accuracy))
+    metrics["total_true_positive"] = total_true_positive
+    metrics["total_false_positive"] = total_false_positive
+    metrics["total_true_negative"] = total_true_negative
+    metrics["total_false_negative"] = total_false_negative
     return metrics
