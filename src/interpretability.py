@@ -121,9 +121,11 @@ class GradCAM:
         return cv2.resize(cam_np, (224, 224))
 
 
+# Use the last stage output as the target layer.
+# This corresponds to the final spatial feature map before global pooling and classification head, similar to the last conv layer in CNN Grad-CAM.
 class SwinGradCAM:
     def __init__(self, model: nn.Module):
-        self._impl = GradCAM(model, model.layers[-1]) # use last layer of last stage, which is the most relevant for classification? Anyway the result make sense
+        self._impl = GradCAM(model, model.layers[-1])
 
     def remove_hooks(self) -> None:
         self._impl.remove_hooks()
@@ -143,7 +145,7 @@ def overlay_heatmap(
     return cv2.cvtColor(blended, cv2.COLOR_BGR2RGB)
 
 
-# Pointing Game metric: https://arxiv.org/pdf/2306.03400.pdf
+# Reference: https://arxiv.org/pdf/1704.03296.pdf
 def pointing_game(
     heatmap: np.ndarray,
     gt_mask: np.ndarray,
