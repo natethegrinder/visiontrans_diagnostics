@@ -45,31 +45,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _relative_to_repo(path: Path) -> str:
-    try:
-        return str(path.relative_to(REPO_ROOT))
-    except ValueError:
-        return str(path)
-
-
-# def _build_attention_handoff_command(output_dir: Path) -> str:
-#     checkpoint_path = _relative_to_repo(output_dir / "checkpoints" / "vit_best_auc.pt")
-#     attention_output_dir = _relative_to_repo(output_dir / "attention")
-#     return "\n".join(
-#         [
-#             "python experiments/experiment_3_vit_attention_metrics.py \\",
-#             "  --config configs/vit_baseline.yaml \\",
-#             "  --experiment-config configs/experiments/experiment_3_vit_attention_metrics.yaml \\",
-#             f"  --checkpoint {checkpoint_path} \\",
-#             "  --only last_layer_mean_top20_pilot \\",
-#             "  --max-val-batches 100 \\",
-#             "  --max-attention-batches 5 \\",
-#             "  --max-heatmaps 20 \\",
-#             f"  --output-dir {attention_output_dir}",
-#         ]
-#     )
-
-
 def _log_artifacts(run_id: str | None, artifact_paths: list[Path]) -> None:
     if not run_id:
         return
@@ -229,10 +204,6 @@ def main() -> None:
         "test_evaluation_reason": report.get("test_evaluation_reason"),
     }
 
-    # attention_command = _build_attention_handoff_command(output_dir)
-    attention_command_path = output_dir / "attention_handoff_command.txt"
-    attention_command_path.write_text(attention_command + "\n")
-
     summary_json = {
         "experiment_name": experiment_config["experiment_name"],
         "variant_name": variant["name"],
@@ -241,7 +212,6 @@ def main() -> None:
         "resolved_config_path": str(resolved_config_path),
         "summary": summary_row,
         "report": report,
-        "attention_handoff_command": attention_command,
     }
     test_summary_json = {
         "test_evaluation_skipped": report.get("test_evaluation_skipped"),
@@ -280,12 +250,9 @@ def main() -> None:
             test_summary_path,
             test_per_label_path,
             test_confusion_path,
-            attention_command_path,
         ],
     )
 
-    # print("[Experiment] Recommended attention follow-up command:", flush=True)
-    # print(attention_command, flush=True)
     print(f"[Experiment] Saved final fixed-baseline outputs to {output_dir}", flush=True)
 
 
