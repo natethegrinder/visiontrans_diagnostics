@@ -1,0 +1,44 @@
+experiment_name: experiment_final_vit_baseline_fixed
+description: >
+  Final fixed-parameter ViT baseline run for team comparison. This is not a
+  grid search. Use dry-run or a short smoke test before launching the full
+  40-epoch experiment because the complete run can still be time-consuming.
+default_output_dir: artifacts/experiments/final_vit_baseline_fixed
+default_pilot_variant: final_vit_baseline_fixed
+
+runtime_defaults:
+  epochs_override:
+  max_train_batches:
+  max_val_batches:
+  num_workers_override:
+
+variants:
+  - name: final_vit_baseline_fixed
+    intent: Team-aligned fixed-parameter ViT baseline for final comparison runs.
+    overrides:
+      project.seed: 42
+      data.augmentation.enabled: true
+      data.augmentation.allow_horizontal_flip: true
+      data.augmentation.horizontal_flip_prob: 0.5
+      data.augmentation.rotation_degrees: 10
+      data.augmentation.color_jitter_brightness: 0.2
+      data.augmentation.color_jitter_contrast: 0.2
+      training.loss: focal
+      training.use_amp: true
+      training.focal_gamma: 2.0
+      training.focal_alpha: 0.25
+      training.use_pos_weight: false
+      training.optimizer: adamw
+      training.learning_rate: 0.0001
+      training.weight_decay: 0.0001
+      training.scheduler: step_warmup_cosine
+      training.warmup_ratio: 0.05
+      training.epochs: 40
+      training.early_stopping_patience: 20
+      training.early_stopping_min_delta: 0.001
+      training.early_stopping_metric: val_mean_auc
+      training.early_stopping_mode: max
+      training.threshold: 0.5
+      training.tune_thresholds: false
+      training.evaluate_test_after_training: true
+      training.final_checkpoint_name: vit_final.pt
