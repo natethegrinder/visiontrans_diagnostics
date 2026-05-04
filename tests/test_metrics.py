@@ -48,6 +48,8 @@ class MetricsTests(unittest.TestCase):
             "micro_f1",
             "exact_match_accuracy",
             "mean_binary_accuracy",
+            "total_true_positive",
+            "total_false_positive",
             "average_precision_A",
             "average_precision_B",
             "average_precision_C",
@@ -175,6 +177,47 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(set(result["thresholds_by_label"].keys()), set(label_names))
         self.assertEqual(tuple(result["threshold_tensor"].shape), (len(label_names),))
         self.assertEqual(set(result["best_f1_by_label"].keys()), set(label_names))
+
+    def test_confusion_metrics_match_hand_computable_example(self) -> None:
+        label_names = ["A", "B"]
+        probabilities = torch.tensor(
+            [
+                [0.9, 0.8],
+                [0.7, 0.3],
+                [0.4, 0.9],
+                [0.2, 0.1],
+            ],
+            dtype=torch.float32,
+        )
+        labels = torch.tensor(
+            [
+                [1.0, 0.0],
+                [0.0, 1.0],
+                [1.0, 1.0],
+                [0.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+
+        metrics = compute_multilabel_metrics(
+            logits=_probabilities_to_logits(probabilities),
+            labels=labels,
+            label_names=label_names,
+            threshold=0.5,
+        )
+
+        self.assertEqual(metrics["true_positive_A"], 1)
+        self.assertEqual(metrics["false_positive_A"], 1)
+        self.assertEqual(metrics["true_negative_A"], 1)
+        self.assertEqual(metrics["false_negative_A"], 1)
+        self.assertEqual(metrics["true_positive_B"], 1)
+        self.assertEqual(metrics["false_positive_B"], 1)
+        self.assertEqual(metrics["true_negative_B"], 1)
+        self.assertEqual(metrics["false_negative_B"], 1)
+        self.assertEqual(metrics["total_true_positive"], 2)
+        self.assertEqual(metrics["total_false_positive"], 2)
+        self.assertEqual(metrics["total_true_negative"], 2)
+        self.assertEqual(metrics["total_false_negative"], 2)
 
 
 if __name__ == "__main__":
