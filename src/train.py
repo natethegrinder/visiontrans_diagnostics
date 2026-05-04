@@ -6,6 +6,7 @@ import json
 import math
 import random
 import time
+import warnings
 from pathlib import Path
 
 import mlflow
@@ -204,7 +205,13 @@ def step_scheduler(
         return
     if batch_level is None and _scheduler_steps_per_batch(config):
         return
-    scheduler.step()
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"The epoch parameter in `scheduler\.step\(\)` was not necessary and is being deprecated.*",
+            category=UserWarning,
+        )
+        scheduler.step()
 
 
 def initialize_early_stopping(config: dict) -> dict[str, object] | None:
@@ -313,7 +320,11 @@ def evaluate_best_checkpoint_on_test_split(
 
     print("[Eval] Running final test evaluation from best val mean AUC checkpoint", flush=True)
     evaluation_model = build_model(config).to(device)
-    checkpoint = torch.load(Path(checkpoint_path), map_location=device)
+    checkpoint = torch.load(
+        Path(checkpoint_path),
+        map_location=device,
+        weights_only=False,
+    )
     evaluation_model.load_state_dict(checkpoint["model_state_dict"])
     test_metrics = evaluate_epoch(
         model=evaluation_model,
@@ -538,7 +549,6 @@ def train_model(
 
     configure_mlflow(config)
     effective_run_name = run_name or config.get("run", {}).get("name")
-    print(f"[MLflow] Tracking URI: {mlflow.get_tracking_uri()}", flush=True)
     print(f"[MLflow] Run name: {effective_run_name}", flush=True)
     best_auc = float("-inf")
     best_macro_f1 = float("-inf")
