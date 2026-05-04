@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 from typing import Sequence
 
 import torch
@@ -19,6 +20,7 @@ def evaluate_epoch(
     max_attention_batches: int | None = None,
     max_batches: int | None = None,
     progress_log_interval: int | None = 50,
+    use_amp: bool = False,
 ) -> (
     dict[str, float]
     | tuple[dict[str, float], list[list[torch.Tensor]]]
@@ -33,6 +35,7 @@ def evaluate_epoch(
     epoch_attention: list[list[torch.Tensor]] = []
     total_batches = len(data_loader)
     effective_total_batches = min(total_batches, max_batches) if max_batches is not None else total_batches
+    amp_enabled = bool(use_amp and device.type == "cuda")
 
     with torch.inference_mode():
         for batch_index, (images, labels) in enumerate(data_loader):
@@ -49,13 +52,16 @@ def evaluate_epoch(
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
 
-            if collect_attention:
-                logits, attn_maps = model(images, return_attention=True)
-                if max_attention_batches is None or batch_index < max_attention_batches:
-                    epoch_attention.append([attention.detach().cpu() for attention in attn_maps])
-            else:
-                logits = model(images)
-            loss = loss_fn(logits, labels)
+            amp_context = torch.amp.autocast("cuda") if amp_enabled else contextlib.nullcontext()
+            with amp_context:
+                if collect_attention:
+                    logits, attn_maps = model(images, return_attention=True)
+                else:
+                    logits = model(images)
+                loss = loss_fn(logits, labels)
+
+            if collect_attention and (max_attention_batches is None or batch_index < max_attention_batches):
+                epoch_attention.append([attention.detach().cpu() for attention in attn_maps])
 
             batch_size = images.size(0)
             running_loss += float(loss.item()) * batch_size
