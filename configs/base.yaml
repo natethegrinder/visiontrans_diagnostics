@@ -60,7 +60,7 @@ evaluation:
 
 mlflow:
   tracking_uri: mlruns
-  experiment_name: cnn_vs_vit_medical
+  experiment_name: vit_baseline_nih
   log_artifacts: true
 
 runtime:
