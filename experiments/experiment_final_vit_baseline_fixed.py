@@ -52,22 +52,22 @@ def _relative_to_repo(path: Path) -> str:
         return str(path)
 
 
-def _build_attention_handoff_command(output_dir: Path) -> str:
-    checkpoint_path = _relative_to_repo(output_dir / "checkpoints" / "vit_best_auc.pt")
-    attention_output_dir = _relative_to_repo(output_dir / "attention")
-    return "\n".join(
-        [
-            "python experiments/experiment_3_vit_attention_metrics.py \\",
-            "  --config configs/vit_baseline.yaml \\",
-            "  --experiment-config configs/experiments/experiment_3_vit_attention_metrics.yaml \\",
-            f"  --checkpoint {checkpoint_path} \\",
-            "  --only last_layer_mean_top20_pilot \\",
-            "  --max-val-batches 100 \\",
-            "  --max-attention-batches 5 \\",
-            "  --max-heatmaps 20 \\",
-            f"  --output-dir {attention_output_dir}",
-        ]
-    )
+# def _build_attention_handoff_command(output_dir: Path) -> str:
+#     checkpoint_path = _relative_to_repo(output_dir / "checkpoints" / "vit_best_auc.pt")
+#     attention_output_dir = _relative_to_repo(output_dir / "attention")
+#     return "\n".join(
+#         [
+#             "python experiments/experiment_3_vit_attention_metrics.py \\",
+#             "  --config configs/vit_baseline.yaml \\",
+#             "  --experiment-config configs/experiments/experiment_3_vit_attention_metrics.yaml \\",
+#             f"  --checkpoint {checkpoint_path} \\",
+#             "  --only last_layer_mean_top20_pilot \\",
+#             "  --max-val-batches 100 \\",
+#             "  --max-attention-batches 5 \\",
+#             "  --max-heatmaps 20 \\",
+#             f"  --output-dir {attention_output_dir}",
+#         ]
+#     )
 
 
 def _log_artifacts(run_id: str | None, artifact_paths: list[Path]) -> None:
@@ -229,7 +229,7 @@ def main() -> None:
         "test_evaluation_reason": report.get("test_evaluation_reason"),
     }
 
-    attention_command = _build_attention_handoff_command(output_dir)
+    # attention_command = _build_attention_handoff_command(output_dir)
     attention_command_path = output_dir / "attention_handoff_command.txt"
     attention_command_path.write_text(attention_command + "\n")
 
@@ -284,8 +284,8 @@ def main() -> None:
         ],
     )
 
-    print("[Experiment] Recommended attention follow-up command:", flush=True)
-    print(attention_command, flush=True)
+    # print("[Experiment] Recommended attention follow-up command:", flush=True)
+    # print(attention_command, flush=True)
     print(f"[Experiment] Saved final fixed-baseline outputs to {output_dir}", flush=True)
 
 
