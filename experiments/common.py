@@ -103,6 +103,27 @@ def build_per_label_rows(
     return rows
 
 
+def build_confusion_rows(
+    metrics: Mapping[str, float],
+    label_names: Sequence[str],
+    prefix: str = "",
+    extra: Mapping[str, object] | None = None,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for label_name in label_names:
+        row = {
+            "label": label_name,
+            f"{prefix}true_positive": metrics.get(f"true_positive_{label_name}"),
+            f"{prefix}false_positive": metrics.get(f"false_positive_{label_name}"),
+            f"{prefix}true_negative": metrics.get(f"true_negative_{label_name}"),
+            f"{prefix}false_negative": metrics.get(f"false_negative_{label_name}"),
+        }
+        if extra:
+            row.update(extra)
+        rows.append(row)
+    return rows
+
+
 def copy_config_with_updates(config: Mapping[str, object], updates: Mapping[str, object]) -> dict:
     from train import merge_dicts
 
