@@ -8,6 +8,10 @@ data/
 artifacts/
 mlruns/
 
+checkpoints/
+
+outputs/
+
 # C extensions
 *.so
 

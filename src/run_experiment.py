@@ -196,11 +196,16 @@ def main() -> None:
         pos_weight=DEFAULT_POS_WEIGHT,
         lr=float(config.get("training", {}).get("learning_rate", 1e-4)),
         weight_decay=float(config.get("training", {}).get("weight_decay", 1e-4)),
+        loss_fn=config.get("training", {}).get("loss_fn", "bce"),
     )
 
     epochs = int(config.get("training", {}).get("epochs", 1))
     if config.get("training", {}).get("scheduler", "") == "cosine":
         trainer.setup_scheduler(num_training_steps=max(1, epochs * len(dataloaders["train"])))
+
+    freeze_epochs = int(config.get("training", {}).get("freeze_epochs", 0))
+    if freeze_epochs > 0:
+        trainer.freeze_backbone()
 
     mlflow_run = maybe_start_mlflow(config, disabled=args.no_mlflow)
     mlflow = mlflow_run[0] if mlflow_run else None
@@ -211,6 +216,9 @@ def main() -> None:
 
     try:
         for epoch in range(1, epochs + 1):
+            if freeze_epochs > 0 and epoch == freeze_epochs + 1:
+                trainer.unfreeze_backbone()
+
             train_loss = trainer.train_epoch(dataloaders["train"])
             val_loss, val_preds, val_labels = trainer.val_epoch(dataloaders["val"])
             auc_results = compute_mean_auc(val_labels, val_preds)

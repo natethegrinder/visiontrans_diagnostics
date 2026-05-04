@@ -1,0 +1,23 @@
+extends: base.yaml
+
+run:
+  name: swin_t_finetune
+  type: architecture_comparison
+
+data:
+  num_channels: 3
+
+model:
+  family: deit_swin
+  architecture: swin_t
+  pretrained: true
+
+training:
+  learning_rate: 0.00001
+  weight_decay: 0.01
+  batch_size: 64
+  epochs: 40
+  freeze_epochs: 5
+  loss_fn: focal
+  early_stopping_patience: 10
+  scheduler: cosine

@@ -5,6 +5,7 @@ from torch import nn
 from .densenet import build_densenet_model
 from .resnet import build_resnet_model
 from .vit import VisionTransformerClassifier, build_vit_model
+from .deit_swin import build_deit_swin_model
 
 
 def build_model(config: dict) -> nn.Module:
@@ -13,6 +14,8 @@ def build_model(config: dict) -> nn.Module:
 
     if family == "vit":
         return build_vit_model(config)
+    if family == "deit_swin":
+        return build_deit_swin_model(config)
     if family == "cnn":
         architecture = model_config.get("architecture", "")
         if architecture.startswith("densenet"):
@@ -28,4 +31,5 @@ __all__ = [
     "build_model",
     "build_resnet_model",
     "build_vit_model",
+    "build_deit_swin_model",
 ]
