@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import math
 import random
@@ -95,7 +96,22 @@ def build_optimizer(config: dict, model: torch.nn.Module) -> torch.optim.Optimiz
     raise ValueError(f"Unsupported optimizer '{optimizer_name}'.")
 
 
-def build_scheduler(config: dict, optimizer: torch.optim.Optimizer) -> torch.optim.lr_scheduler.LRScheduler | None:
+def _scheduler_name(config: dict) -> str:
+    scheduler_name = config.get("training", {}).get("scheduler")
+    if not scheduler_name:
+        return "none"
+    return str(scheduler_name).lower()
+
+
+def _scheduler_steps_per_batch(config: dict) -> bool:
+    return _scheduler_name(config) == "step_warmup_cosine"
+
+
+def build_scheduler(
+    config: dict,
+    optimizer: torch.optim.Optimizer,
+    steps_per_epoch: int | None = None,
+) -> torch.optim.lr_scheduler.LRScheduler | None:
     training_config = config.get("training", {})
     scheduler_name = training_config.get("scheduler")
     if not scheduler_name or scheduler_name == "none":
@@ -117,6 +133,33 @@ def build_scheduler(config: dict, optimizer: torch.optim.Optimizer) -> torch.opt
             return 0.5 * (1.0 + math.cos(math.pi * progress))
 
         return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+    if scheduler_name == "step_warmup_cosine":
+        if steps_per_epoch is None:
+            raise ValueError("steps_per_epoch is required for step_warmup_cosine scheduling.")
+
+        epochs = int(training_config.get("epochs", 30))
+        warmup_ratio = float(training_config.get("warmup_ratio", 0.05))
+        num_training_steps = max(1, int(steps_per_epoch) * epochs)
+        if num_training_steps <= 1:
+            return torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.1, total_iters=1)
+
+        warmup_steps = max(1, int(num_training_steps * warmup_ratio))
+        warmup_steps = min(warmup_steps, num_training_steps - 1)
+        cosine_steps = max(1, num_training_steps - warmup_steps)
+        warmup = torch.optim.lr_scheduler.LinearLR(
+            optimizer,
+            start_factor=0.1,
+            total_iters=warmup_steps,
+        )
+        cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=cosine_steps,
+        )
+        return torch.optim.lr_scheduler.SequentialLR(
+            optimizer,
+            schedulers=[warmup, cosine],
+            milestones=[warmup_steps],
+        )
     if scheduler_name == "step":
         step_size = int(training_config.get("step_size", 10))
         gamma = float(training_config.get("gamma", 0.1))
@@ -132,7 +175,7 @@ def initialize_scheduler_learning_rate(
     if scheduler is None:
         return
 
-    scheduler_name = str(config.get("training", {}).get("scheduler", "none")).lower()
+    scheduler_name = _scheduler_name(config)
     if scheduler_name != "warmup_cosine":
         return
 
@@ -151,12 +194,94 @@ def initialize_scheduler_learning_rate(
 def step_scheduler(
     config: dict,
     scheduler: torch.optim.lr_scheduler.LRScheduler | None,
-    epoch: int,
+    epoch: int | None = None,
+    batch_level: bool | None = None,
 ) -> None:
     if scheduler is None:
         return
 
+    if batch_level is not None and batch_level != _scheduler_steps_per_batch(config):
+        return
+    if batch_level is None and _scheduler_steps_per_batch(config):
+        return
     scheduler.step()
+
+
+def initialize_early_stopping(config: dict) -> dict[str, object] | None:
+    training_config = config.get("training", {})
+    metric_name = training_config.get("early_stopping_metric")
+    patience = training_config.get("early_stopping_patience")
+    if metric_name is None or patience is None:
+        return None
+
+    return {
+        "metric_name": str(metric_name),
+        "patience": int(patience),
+        "min_delta": float(training_config.get("early_stopping_min_delta", 0.0)),
+        "mode": str(training_config.get("early_stopping_mode", "max")).lower(),
+        "best_value": None,
+        "best_epoch": None,
+        "bad_epochs": 0,
+        "stopped_epoch": None,
+        "should_stop": False,
+    }
+
+
+def resolve_early_stopping_metric_value(
+    metric_name: str,
+    train_metrics: dict[str, float],
+    val_metrics: dict[str, float],
+    tuned_val_metrics: dict[str, float] | None = None,
+) -> float:
+    if metric_name.startswith("train_"):
+        return float(train_metrics[metric_name.removeprefix("train_")])
+    if metric_name.startswith("val_tuned_"):
+        if tuned_val_metrics is None:
+            raise KeyError(f"Requested early stopping metric '{metric_name}' but tuned validation metrics are unavailable.")
+        return float(tuned_val_metrics[metric_name.removeprefix("val_tuned_")])
+    if metric_name.startswith("val_"):
+        return float(val_metrics[metric_name.removeprefix("val_")])
+    if metric_name in val_metrics:
+        return float(val_metrics[metric_name])
+    raise KeyError(f"Unable to resolve early stopping metric '{metric_name}'.")
+
+
+def update_early_stopping_state(
+    state: dict[str, object] | None,
+    metric_value: float,
+    epoch: int,
+) -> dict[str, object] | None:
+    if state is None:
+        return None
+
+    mode = str(state["mode"])
+    min_delta = float(state["min_delta"])
+    best_value = state["best_value"]
+
+    is_finite_metric = math.isfinite(metric_value)
+    if best_value is None:
+        improved = is_finite_metric
+    elif not is_finite_metric:
+        improved = False
+    elif mode == "max":
+        improved = metric_value > float(best_value) + min_delta
+    elif mode == "min":
+        improved = metric_value < float(best_value) - min_delta
+    else:
+        raise ValueError(f"Unsupported early stopping mode '{mode}'.")
+
+    if improved:
+        state["best_value"] = float(metric_value)
+        state["best_epoch"] = int(epoch)
+        state["bad_epochs"] = 0
+        state["should_stop"] = False
+        return state
+
+    state["bad_epochs"] = int(state["bad_epochs"]) + 1
+    if int(state["bad_epochs"]) >= int(state["patience"]):
+        state["should_stop"] = True
+        state["stopped_epoch"] = int(epoch)
+    return state
 
 
 def _peak_gpu_memory_mb(device: torch.device) -> float:
@@ -165,17 +290,61 @@ def _peak_gpu_memory_mb(device: torch.device) -> float:
     return float(torch.cuda.max_memory_allocated(device) / (1024 ** 2))
 
 
+def evaluate_best_checkpoint_on_test_split(
+    config: dict,
+    data_module: dict[str, object],
+    loss_fn: torch.nn.Module,
+    device: torch.device,
+    label_names: list[str],
+    checkpoint_path: str | Path,
+    threshold: float | torch.Tensor = 0.5,
+    max_batches: int | None = None,
+    progress_log_interval: int | None = 50,
+) -> dict[str, object]:
+    dataloaders = data_module.get("dataloaders", {})
+    test_loader = dataloaders.get("test") if isinstance(dataloaders, dict) else None
+    if test_loader is None:
+        return {
+            "skipped": True,
+            "reason": "Test dataloader is unavailable for this run.",
+            "metrics": None,
+        }
+
+    print("[Eval] Running final test evaluation from best val mean AUC checkpoint", flush=True)
+    evaluation_model = build_model(config).to(device)
+    checkpoint = torch.load(Path(checkpoint_path), map_location=device)
+    evaluation_model.load_state_dict(checkpoint["model_state_dict"])
+    test_metrics = evaluate_epoch(
+        model=evaluation_model,
+        data_loader=test_loader,
+        loss_fn=loss_fn,
+        device=device,
+        label_names=label_names,
+        threshold=threshold,
+        max_batches=max_batches,
+        progress_log_interval=progress_log_interval,
+    )
+    return {
+        "skipped": False,
+        "reason": None,
+        "metrics": test_metrics,
+    }
+
+
 def train_one_epoch(
+    config: dict,
     model: torch.nn.Module,
     data_loader: torch.utils.data.DataLoader,
     loss_fn: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler | None,
     device: torch.device,
     label_names: list[str],
     threshold: float = 0.5,
     gradient_clip_norm: float | None = None,
     max_batches: int | None = None,
     progress_log_interval: int | None = 50,
+    scaler: torch.amp.GradScaler | None = None,
 ) -> dict[str, float]:
     model.train()
     running_loss = 0.0
@@ -199,13 +368,25 @@ def train_one_epoch(
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
 
-        optimizer.zero_grad()
-        logits = model(images)
-        loss = loss_fn(logits, labels)
-        loss.backward()
-        if gradient_clip_norm is not None:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=gradient_clip_norm)
-        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+        amp_context = torch.amp.autocast("cuda") if scaler is not None else contextlib.nullcontext()
+        with amp_context:
+            logits = model(images)
+            loss = loss_fn(logits, labels)
+
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            if gradient_clip_norm is not None:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=gradient_clip_norm)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            if gradient_clip_norm is not None:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=gradient_clip_norm)
+            optimizer.step()
+        step_scheduler(config, scheduler, batch_level=True)
 
         batch_size = images.size(0)
         running_loss += float(loss.item()) * batch_size
@@ -220,7 +401,11 @@ def train_one_epoch(
     return metrics
 
 
-def build_run_params(config: dict, pos_weight_stats: dict) -> dict[str, object]:
+def build_run_params(
+    config: dict,
+    pos_weight_stats: dict,
+    amp_enabled: bool | None = None,
+) -> dict[str, object]:
     data_config = config.get("data", {})
     model_config = config.get("model", {})
     training_config = config.get("training", {})
@@ -245,17 +430,28 @@ def build_run_params(config: dict, pos_weight_stats: dict) -> dict[str, object]:
         "activation": "gelu",
         "norm_first": model_config.get("norm_first", True),
         "optimizer_name": training_config.get("optimizer", "adamw"),
+        "scheduler_name": training_config.get("scheduler", "none"),
         "learning_rate": training_config.get("learning_rate", 1e-4),
         "weight_decay": training_config.get("weight_decay", 1e-4),
+        "warmup_epochs": training_config.get("warmup_epochs", 0),
+        "warmup_ratio": training_config.get("warmup_ratio"),
         "batch_size": training_config.get("batch_size", data_config.get("batch_size", 32)),
         "epochs": training_config.get("epochs", 30),
         "loss_function_name": training_config.get("loss", "bce_with_logits"),
         "use_pos_weight": training_config.get("use_pos_weight", True),
+        "focal_gamma": training_config.get("focal_gamma"),
+        "focal_alpha": training_config.get("focal_alpha"),
         "pos_weight_clamp": data_config.get("pos_weight_clamp", 50),
         "threshold": training_config.get("threshold", 0.5),
         "tune_thresholds": training_config.get("tune_thresholds", False),
         "threshold_tuning_objective": training_config.get("threshold_tuning_objective", "f1"),
         "threshold_grid": training_config.get("threshold_grid"),
+        "use_amp": training_config.get("use_amp", False),
+        "amp_enabled": amp_enabled if amp_enabled is not None else False,
+        "early_stopping_patience": training_config.get("early_stopping_patience"),
+        "early_stopping_min_delta": training_config.get("early_stopping_min_delta"),
+        "early_stopping_metric": training_config.get("early_stopping_metric"),
+        "early_stopping_mode": training_config.get("early_stopping_mode"),
         "seed": config.get("project", {}).get("seed", 42),
         "augmentation_enabled": augmentation_config.get("enabled", False),
         "horizontal_flip_prob": augmentation_config.get("horizontal_flip_prob", 0.0),
@@ -309,11 +505,21 @@ def train_model(
     pos_weight_stats = data_module["pos_weight_stats"]
     use_pos_weight = bool(config.get("training", {}).get("use_pos_weight", True))
     pos_weight_tensor = pos_weight_stats["pos_weight_tensor"].to(device) if use_pos_weight else None
+    runtime_config = config.get("runtime", {})
+    max_train_batches = runtime_config.get("max_train_batches")
+    max_val_batches = runtime_config.get("max_val_batches")
+    max_train_batches = int(max_train_batches) if max_train_batches is not None else None
+    max_val_batches = int(max_val_batches) if max_val_batches is not None else None
+    progress_log_interval = runtime_config.get("progress_log_interval", 50)
+    progress_log_interval = int(progress_log_interval) if progress_log_interval is not None else None
+    train_steps_per_epoch = len(data_module["dataloaders"]["train"])
+    if max_train_batches is not None:
+        train_steps_per_epoch = min(train_steps_per_epoch, max_train_batches)
     print("[Loss] Building loss function...", flush=True)
     loss_fn = build_loss_function(config, pos_weight=pos_weight_tensor)
     print("[Optim] Building optimizer and scheduler...", flush=True)
     optimizer = build_optimizer(config, model)
-    scheduler = build_scheduler(config, optimizer)
+    scheduler = build_scheduler(config, optimizer, steps_per_epoch=train_steps_per_epoch)
     initialize_scheduler_learning_rate(config, optimizer, scheduler)
     threshold = float(config.get("training", {}).get("threshold", 0.5))
     gradient_clip_norm = config.get("training", {}).get("gradient_clip_norm")
@@ -322,13 +528,11 @@ def train_model(
     tune_thresholds = bool(config.get("training", {}).get("tune_thresholds", False))
     threshold_tuning_objective = str(config.get("training", {}).get("threshold_tuning_objective", "f1"))
     threshold_grid = config.get("training", {}).get("threshold_grid")
-    runtime_config = config.get("runtime", {})
-    max_train_batches = runtime_config.get("max_train_batches")
-    max_val_batches = runtime_config.get("max_val_batches")
-    max_train_batches = int(max_train_batches) if max_train_batches is not None else None
-    max_val_batches = int(max_val_batches) if max_val_batches is not None else None
-    progress_log_interval = runtime_config.get("progress_log_interval", 50)
-    progress_log_interval = int(progress_log_interval) if progress_log_interval is not None else None
+    use_amp = bool(config.get("training", {}).get("use_amp", False))
+    amp_enabled = use_amp and device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda") if amp_enabled else None
+    evaluate_test_after_training = bool(config.get("training", {}).get("evaluate_test_after_training", False))
+    early_stopping_state = initialize_early_stopping(config)
 
     configure_mlflow(config)
     effective_run_name = run_name or config.get("run", {}).get("name")
@@ -344,12 +548,22 @@ def train_model(
     checkpoint_dir = Path(config.get("training", {}).get("checkpoint_dir", "artifacts/models"))
     best_auc_path = checkpoint_dir / "vit_best_auc.pt"
     best_macro_f1_path = checkpoint_dir / "vit_best_macro_f1.pt"
+    final_checkpoint_name = config.get("training", {}).get("final_checkpoint_name")
+    final_checkpoint_path = checkpoint_dir / str(final_checkpoint_name) if final_checkpoint_name else None
+    stopped_early = False
+    stopped_epoch: int | None = None
+    final_epoch_index: int | None = None
+    test_metrics: dict[str, float] | None = None
+    test_evaluation_skipped = not evaluate_test_after_training
+    test_evaluation_reason: str | None = (
+        "Test evaluation disabled in config." if not evaluate_test_after_training else None
+    )
 
     train_start_time = time.perf_counter()
     with mlflow.start_run(run_name=effective_run_name, nested=nested_run) as run:
         print(f"[MLflow] Started run: {run.info.run_id}", flush=True)
         print("[Train] Starting training loop", flush=True)
-        log_params_flat(build_run_params(config, pos_weight_stats))
+        log_params_flat(build_run_params(config, pos_weight_stats, amp_enabled=amp_enabled))
         log_label_statistics(pos_weight_stats)
         mlflow.log_dict(config, "config_resolved.json")
 
@@ -361,16 +575,19 @@ def train_model(
             epoch_start = time.perf_counter()
             print(f"[Train] Running train epoch {epoch + 1}/{epochs}", flush=True)
             train_metrics = train_one_epoch(
+                config=config,
                 model=model,
                 data_loader=data_module["dataloaders"]["train"],
                 loss_fn=loss_fn,
                 optimizer=optimizer,
+                scheduler=scheduler,
                 device=device,
                 label_names=label_names,
                 threshold=threshold,
                 gradient_clip_norm=gradient_clip_norm,
                 max_batches=max_train_batches,
                 progress_log_interval=progress_log_interval,
+                scaler=scaler,
             )
             print(f"[Eval] Running validation epoch {epoch + 1}/{epochs}", flush=True)
             val_metrics = evaluate_epoch(
@@ -383,6 +600,7 @@ def train_model(
                 return_outputs=tune_thresholds,
                 max_batches=max_val_batches,
                 progress_log_interval=progress_log_interval,
+                use_amp=amp_enabled,
             )
 
             if tune_thresholds:
@@ -409,7 +627,7 @@ def train_model(
             else:
                 tuned_val_metrics = None
 
-            step_scheduler(config, scheduler, epoch)
+            step_scheduler(config, scheduler, epoch=epoch, batch_level=False)
 
             epoch_time_sec = time.perf_counter() - epoch_start
             learning_rate = float(optimizer.param_groups[0]["lr"])
@@ -433,7 +651,20 @@ def train_model(
                 for label_name, tuned_threshold in latest_tuned_thresholds.items():
                     mlflow.log_metric(f"threshold_{label_name}", float(tuned_threshold), step=epoch)
 
-            checkpoint_dir = config.get("training", {}).get("checkpoint_dir", "artifacts/models")
+            current_early_stopping_metric: float | None = None
+            if early_stopping_state is not None:
+                current_early_stopping_metric = resolve_early_stopping_metric_value(
+                    str(early_stopping_state["metric_name"]),
+                    train_metrics=train_metrics,
+                    val_metrics=val_metrics,
+                    tuned_val_metrics=tuned_val_metrics,
+                )
+                early_stopping_state = update_early_stopping_state(
+                    early_stopping_state,
+                    metric_value=current_early_stopping_metric,
+                    epoch=epoch,
+                )
+
             checkpoint_state = {
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
@@ -441,6 +672,9 @@ def train_model(
                 "config": config,
                 "val_metrics": val_metrics,
                 "pos_weight_stats": pos_weight_stats,
+                "best_auc": best_auc,
+                "best_macro_f1": best_macro_f1,
+                "early_stopping_state": dict(early_stopping_state) if early_stopping_state is not None else None,
             }
             if scheduler is not None:
                 checkpoint_state["scheduler_state_dict"] = scheduler.state_dict()
@@ -450,6 +684,7 @@ def train_model(
             if val_metrics["mean_auc"] > best_auc:
                 best_auc = val_metrics["mean_auc"]
                 best_auc_epoch = epoch
+                checkpoint_state["best_auc"] = best_auc
                 save_checkpoint(checkpoint_state, best_auc_path)
                 mlflow.log_metric("best_val_mean_auc", best_auc)
                 mlflow.log_metric("best_val_mean_auc_epoch", epoch)
@@ -461,6 +696,7 @@ def train_model(
             if val_metrics["macro_f1"] > best_macro_f1:
                 best_macro_f1 = val_metrics["macro_f1"]
                 best_macro_f1_epoch = epoch
+                checkpoint_state["best_macro_f1"] = best_macro_f1
                 save_checkpoint(checkpoint_state, best_macro_f1_path)
                 mlflow.log_metric("best_val_macro_f1", best_macro_f1)
                 mlflow.log_metric("best_val_macro_f1_epoch", epoch)
@@ -499,6 +735,63 @@ def train_model(
                 f"time_sec={epoch_time_sec:.1f}",
                 flush=True,
             )
+            final_epoch_index = epoch
+
+            if early_stopping_state is not None and bool(early_stopping_state["should_stop"]):
+                stopped_early = True
+                stopped_epoch = int(early_stopping_state["stopped_epoch"])
+                print(
+                    "[EarlyStopping] "
+                    f"Stopping after epoch {epoch + 1} because "
+                    f"{early_stopping_state['metric_name']} did not improve by at least "
+                    f"{float(early_stopping_state['min_delta']):.4f} for "
+                    f"{int(early_stopping_state['patience'])} epochs.",
+                    flush=True,
+                )
+                break
+
+        final_checkpoint_state = {
+            "epoch": final_epoch_index,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "config": config,
+            "val_metrics": history[-1]["val_metrics"] if history else {},
+            "pos_weight_stats": pos_weight_stats,
+            "best_auc": best_auc,
+            "best_macro_f1": best_macro_f1,
+            "early_stopping_state": dict(early_stopping_state) if early_stopping_state is not None else None,
+        }
+        if scheduler is not None:
+            final_checkpoint_state["scheduler_state_dict"] = scheduler.state_dict()
+        if latest_tuned_thresholds is not None:
+            final_checkpoint_state["tuned_thresholds"] = latest_tuned_thresholds
+        if final_checkpoint_path is not None:
+            save_checkpoint(final_checkpoint_state, final_checkpoint_path)
+            print(f"[Checkpoint] Saved final checkpoint to {final_checkpoint_path}", flush=True)
+
+        if evaluate_test_after_training:
+            if device.type == "cuda":
+                torch.cuda.reset_peak_memory_stats(device)
+            test_result = evaluate_best_checkpoint_on_test_split(
+                config=config,
+                data_module=data_module,
+                loss_fn=loss_fn,
+                device=device,
+                label_names=label_names,
+                checkpoint_path=best_auc_path,
+                threshold=threshold,
+                max_batches=max_val_batches,
+                progress_log_interval=progress_log_interval,
+                use_amp=amp_enabled,
+            )
+            test_evaluation_skipped = bool(test_result["skipped"])
+            test_evaluation_reason = test_result["reason"]
+            if not test_evaluation_skipped:
+                test_metrics = dict(test_result["metrics"])
+                test_metrics["peak_gpu_memory_mb"] = _peak_gpu_memory_mb(device)
+                log_epoch_metrics(test_metrics, split="test", epoch=final_epoch_index or 0)
+            else:
+                print(f"[Eval] Skipping test evaluation: {test_evaluation_reason}", flush=True)
 
     total_runtime_sec = time.perf_counter() - train_start_time
     print(f"[Train] Finished training in {total_runtime_sec:.1f} sec", flush=True)
@@ -515,10 +808,18 @@ def train_model(
         "best_macro_f1_epoch": best_macro_f1_epoch,
         "best_auc_checkpoint": str(best_auc_path),
         "best_macro_f1_checkpoint": str(best_macro_f1_path),
+        "final_checkpoint": str(final_checkpoint_path) if final_checkpoint_path is not None else None,
         "device": str(device),
         "pos_weight_stats": pos_weight_stats,
         "config": config,
         "total_runtime_sec": total_runtime_sec,
+        "stopped_early": stopped_early,
+        "stopped_epoch": stopped_epoch,
+        "early_stopping_state": dict(early_stopping_state) if early_stopping_state is not None else None,
+        "final_epoch_index": final_epoch_index,
+        "test_metrics": test_metrics,
+        "test_evaluation_skipped": test_evaluation_skipped,
+        "test_evaluation_reason": test_evaluation_reason,
     }
 
 
