@@ -1,0 +1,36 @@
+{
+  "loss_name": "bce_with_logits",
+  "imbalance_strategy": "pos_weight",
+  "positive_count": {
+    "Atelectasis": 7471.0,
+    "Cardiomegaly": 1534.0,
+    "Effusion": 7802.0,
+    "Infiltration": 12412.0,
+    "Mass": 3701.0,
+    "Nodule": 4247.0,
+    "Pneumonia": 793.0,
+    "Pneumothorax": 2397.0,
+    "Consolidation": 2586.0,
+    "Edema": 1262.0,
+    "Emphysema": 1284.0,
+    "Fibrosis": 1112.0,
+    "Pleural_Thickening": 2044.0,
+    "Hernia": 131.0
+  },
+  "pos_weight": {
+    "Atelectasis": 9.48614643287378,
+    "Cardiomegaly": 20.0,
+    "Effusion": 9.04127146885414,
+    "Infiltration": 5.311795037060909,
+    "Mass": 20.0,
+    "Nodule": 17.44643277607723,
+    "Pneumonia": 20.0,
+    "Pneumothorax": 20.0,
+    "Consolidation": 20.0,
+    "Edema": 20.0,
+    "Emphysema": 20.0,
+    "Fibrosis": 20.0,
+    "Pleural_Thickening": 20.0,
+    "Hernia": 20.0
+  }
+}
