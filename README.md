@@ -47,7 +47,23 @@
 # exp 3 outputs: 
 - outputs/interpretability/cnn_resnet18_nih_baseline_bce_grad_cam_iou.json, overlay images
 
+# tuning footprints (did not run)
+- python -m src.tune_thresholds --config configs/cnn_baseline.yaml --checkpoint outputs/checkpoints/cnn_resnet18_nih_baseline_bce.pt --loss bce --device cuda --tune-split val --report-split test
+ 
+# results summarize
+- 
+- single-run report summary:
+- python -m src.summarize_results --loss bce --split test
+- python -m src.summarize_results --loss focal --split test
+- each run writes one report JSON plus two figures under outputs/reports/: report_summary.json, f1_vs_epoch.png, confusion_matrix.png
 
-
+- all-loss report summary and comparison:
+- python -m src.summarize_results --all-losses --split test
+- this keeps the existing single-loss outputs and additionally writes a combined comparison JSON and two comparison plots
+- combined comparison outputs:
+- outputs/reports/bce_vs_focal_test_report_summary.json
+- outputs/reports/bce_vs_focal_test_report_metrics.png
+- outputs/reports/bce_vs_focal_test_f1_vs_epoch.png
+- in the same run, BCE and focal per-run report files are also generated automatically if the corresponding MLflow runs and evaluation JSON files already exist
 
 
