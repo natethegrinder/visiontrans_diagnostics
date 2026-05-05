@@ -15,8 +15,8 @@ The recommended primary CNN baseline is DenseNet121 pretrained with weighted BCE
 
 | Experiment | Config | Model | Pretraining | Loss | Purpose |
 | --- | --- | --- | --- | --- | --- |
-| ResNet18 BCE | `configs/cnn_resnet18_bce.yaml` | ResNet18 | true | weighted BCE | ResNet18 CNN baseline |
-| ResNet18 Focal | `configs/cnn_resnet18_focal.yaml` | ResNet18 | true | focal loss | ResNet18 loss ablation |
+| ResNet18 BCE | `configs/cnn_resnet18_bce.yaml` | ResNet18 | false | weighted BCE | ResNet18 CNN baseline from random initialization |
+| ResNet18 Focal | `configs/cnn_resnet18_focal.yaml` | ResNet18 | false | focal loss | ResNet18 loss ablation from random initialization |
 | DenseNet121 No Pretrain BCE | `configs/cnn_densenet121_no_pretrain_bce.yaml` | DenseNet121 | false | weighted BCE | DenseNet121 pretraining ablation |
 | DenseNet121 Pretrained BCE | `configs/cnn_densenet121_pretrained_bce.yaml` | DenseNet121 | true | weighted BCE | Main CheXNet-style CNN baseline |
 | DenseNet121 Pretrained Focal | `configs/cnn_densenet121_pretrained_focal.yaml` | DenseNet121 | true | focal loss | DenseNet121 loss ablation |
