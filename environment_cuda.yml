@@ -1,0 +1,36 @@
+name: visiontrans-diagnostics
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+
+  # CUDA build for Linux GPU training, tested target: RTX 4090.
+  - pytorch=2.5.1
+  - torchvision=0.20.1
+  - pytorch-cuda=12.4
+
+  # Experiment tracking and config
+  - mlflow
+  - pyyaml
+
+  # Analysis and plotting
+  - matplotlib
+  - seaborn
+
+  # Data handling
+  - pandas
+  - numpy
+  - pillow
+
+  # Jupyter
+  - ipykernel
+  - jupyterlab
+
+  - pip:
+      - timm==0.9.12
+      - captum
+      - kagglehub

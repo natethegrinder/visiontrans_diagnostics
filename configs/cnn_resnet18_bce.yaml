@@ -1,0 +1,8 @@
+extends: cnn_resnet18_base.yaml
+
+run:
+  name: resnet18_bce
+  type: cnn_baseline
+
+training:
+  loss: bce_with_logits

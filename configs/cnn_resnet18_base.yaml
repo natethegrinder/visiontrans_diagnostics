@@ -1,0 +1,5 @@
+extends: cnn_base.yaml
+
+model:
+  architecture: resnet18
+  pretrained: true

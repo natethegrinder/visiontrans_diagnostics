@@ -1,0 +1,5 @@
+extends: cnn_base.yaml
+
+model:
+  architecture: densenet121
+  pretrained: true

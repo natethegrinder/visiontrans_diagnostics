@@ -1,9 +1,5 @@
 extends: base.yaml
 
-run:
-  name: densenet121_chexnet_style_baseline
-  type: architecture_comparison
-
 data:
   image_size: 224
   num_channels: 1
@@ -15,8 +11,6 @@ data:
 
 model:
   family: cnn
-  architecture: densenet121
-  pretrained: true
   dropout: 0.2
 
 training:
@@ -25,7 +19,6 @@ training:
   batch_size: 96
   epochs: 30
   weight_decay: 0.0001
-  loss: bce_with_logits
   scheduler: cosine
   mixed_precision: true
   cudnn_benchmark: true

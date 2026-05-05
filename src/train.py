@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from typing import Any
 
 import numpy as np
@@ -139,6 +140,7 @@ class ExperimentTrainer:
         self.scheduler = None
         self.use_amp = use_amp and device.type == "cuda"
         self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
+        self.gpu_samples: list[dict[str, float]] = []
 
     def setup_scheduler(self, num_training_steps: int, warmup_ratio: float = 0.05) -> None:
         warmup_steps = max(1, int(num_training_steps * warmup_ratio))
@@ -170,6 +172,7 @@ class ExperimentTrainer:
         progress_interval: int = 0,
     ) -> float:
         self.model.train()
+        self.gpu_samples = []
         total_loss = 0.0
         total_batches = len(loader)
         for batch_index, (images, labels) in enumerate(loader, start=1):
@@ -189,6 +192,7 @@ class ExperimentTrainer:
                 or batch_index == total_batches
                 or batch_index % progress_interval == 0
             ):
+                self._sample_gpu_stats()
                 epoch_text = (
                     f"epoch={epoch}/{total_epochs} "
                     if epoch is not None and total_epochs is not None
@@ -202,6 +206,32 @@ class ExperimentTrainer:
                     flush=True,
                 )
         return total_loss / len(loader)
+
+    def _sample_gpu_stats(self) -> None:
+        if self.device.type != "cuda" or not torch.cuda.is_available():
+            return
+        bytes_per_mb = 1024.0 * 1024.0
+        sample = {
+            "memory_allocated_mb": float(torch.cuda.memory_allocated(self.device) / bytes_per_mb),
+            "memory_reserved_mb": float(torch.cuda.memory_reserved(self.device) / bytes_per_mb),
+        }
+        utilization = query_nvidia_smi_utilization()
+        if utilization is not None:
+            sample["utilization_percent"] = utilization
+        self.gpu_samples.append(sample)
+
+    def average_gpu_stats(self) -> dict[str, float]:
+        if not self.gpu_samples:
+            return {
+                "gpu_avg_memory_allocated_mb": 0.0,
+                "gpu_avg_memory_reserved_mb": 0.0,
+                "gpu_avg_utilization_percent": 0.0,
+            }
+        return {
+            "gpu_avg_memory_allocated_mb": float(np.mean([s["memory_allocated_mb"] for s in self.gpu_samples])),
+            "gpu_avg_memory_reserved_mb": float(np.mean([s["memory_reserved_mb"] for s in self.gpu_samples])),
+            "gpu_avg_utilization_percent": float(np.mean([s.get("utilization_percent", 0.0) for s in self.gpu_samples])),
+        }
 
     def val_epoch(self, loader: DataLoader) -> tuple[float, np.ndarray, np.ndarray]:
         """Returns (avg_loss, preds, labels). preds are post-sigmoid probabilities."""
@@ -224,3 +254,25 @@ class ExperimentTrainer:
 
 # Backward-compatible alias for existing imports.
 ViTTrainer = ExperimentTrainer
+
+
+def query_nvidia_smi_utilization() -> float | None:
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    first_value = result.stdout.strip().splitlines()[0].strip()
+    try:
+        return float(first_value)
+    except ValueError:
+        return None

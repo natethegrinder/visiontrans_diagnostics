@@ -145,6 +145,25 @@ def per_class_binary_metrics(y_true: np.ndarray, y_binary: np.ndarray) -> dict[s
     return metrics
 
 
+def compute_confusion_matrices(y_true: np.ndarray, y_binary: np.ndarray) -> dict[str, Any]:
+    per_class: dict[str, list[list[int]]] = {}
+    aggregate = np.zeros((2, 2), dtype=np.int64)
+    for index, label in enumerate(DISEASE_LABELS):
+        true = y_true[:, index].astype(bool)
+        pred = y_binary[:, index].astype(bool)
+        tn = int(np.logical_and(~true, ~pred).sum())
+        fp = int(np.logical_and(~true, pred).sum())
+        fn = int(np.logical_and(true, ~pred).sum())
+        tp = int(np.logical_and(true, pred).sum())
+        matrix = np.array([[tn, fp], [fn, tp]], dtype=np.int64)
+        aggregate += matrix
+        per_class[label] = matrix.tolist()
+    return {
+        "aggregate": aggregate.tolist(),
+        "per_class": per_class,
+    }
+
+
 def micro_metrics(y_true: np.ndarray, y_binary: np.ndarray) -> dict[str, float]:
     tp, fp, fn = binary_counts(y_true, y_binary)
     precision = precision_from_counts(tp, fp)
@@ -175,6 +194,7 @@ def compute_multilabel_metrics(
     auroc = compute_mean_auc(y_true, y_pred)
     pr_auc = _compute_pr_auc(y_true, y_pred)
     per_class = per_class_binary_metrics(y_true, y_binary)
+    confusion_matrices = compute_confusion_matrices(y_true, y_binary)
     micro = micro_metrics(y_true, y_binary)
     macro_f1 = float(np.mean(list(per_class["f1"].values())))
     macro_precision = float(np.mean(list(per_class["precision"].values())))
@@ -195,6 +215,8 @@ def compute_multilabel_metrics(
         "micro_recall": micro["recall"],
         "label_accuracy": float((y_binary == y_true).mean()),
         "exact_match_accuracy": float(np.all(y_binary == y_true, axis=1).mean()),
+        "confusion_matrix": confusion_matrices["per_class"],
+        "aggregate_confusion_matrix": confusion_matrices["aggregate"],
         "per_class_f1": per_class["f1"],
         "per_class_precision": per_class["precision"],
         "per_class_recall": per_class["recall"],
@@ -280,42 +302,6 @@ def load_checkpoint(checkpoint_path: Path, model: torch.nn.Module, device: torch
     raise ValueError(f"Unsupported checkpoint format: {checkpoint_path}")
 
 
-def _sample_manifest(source_path: Path, destination_path: Path, max_rows: int, seed: int) -> None:
-    frame = pd.read_csv(source_path)
-    if max_rows > 0 and len(frame) > max_rows:
-        frame = frame.sample(n=max_rows, random_state=seed).sort_index()
-    destination_path.parent.mkdir(parents=True, exist_ok=True)
-    frame.to_csv(destination_path, index=False)
-
-
-def maybe_prepare_smoke_manifests(config: dict[str, Any]) -> dict[str, Any]:
-    smoke_config = config.get("smoke_test", {})
-    if not smoke_config.get("enabled", False):
-        return config
-
-    data_config = config["data"]
-    seed = int(config.get("project", {}).get("seed", 42))
-    run_name = config.get("run", {}).get("name", "smoke_test")
-    smoke_dir = Path(data_config.get("manifest_dir", "../data/manifests")) / "smoke"
-
-    split_limits = {
-        "train": int(smoke_config.get("max_train_samples", 512)),
-        "val": int(smoke_config.get("max_val_samples", 128)),
-        "test": int(smoke_config.get("max_test_samples", 128)),
-    }
-    config = dict(config)
-    config["data"] = dict(data_config)
-    for split_name, max_rows in split_limits.items():
-        source_key = f"{split_name}_manifest"
-        source_path = Path(data_config[source_key])
-        if not source_path.exists():
-            continue
-        destination_path = smoke_dir / f"{run_name}_{split_name}.csv"
-        _sample_manifest(source_path, destination_path, max_rows, seed)
-        config["data"][source_key] = str(destination_path)
-    return config
-
-
 def print_auc_table(results: dict[str, float]) -> None:
     print(f"\n  {'Label':<22}  {'AUC':>6}")
     print(f"  {'-'*22}  {'-'*6}")
@@ -351,7 +337,6 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
-    config = maybe_prepare_smoke_manifests(config)
     device = _resolve_device(args.device)
     threshold = float(args.threshold if args.threshold is not None else config.get("evaluation", {}).get("threshold", 0.5))
     dataloaders = build_dataloaders(config)

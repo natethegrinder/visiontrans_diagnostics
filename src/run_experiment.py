@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import time
 from pathlib import Path
 from typing import Any
 
@@ -12,13 +13,13 @@ import torch
 
 from config import load_config
 from data import build_dataloaders, build_nih_manifests
-from evaluate import compute_mean_auc, evaluate_model, print_auc_table, save_metrics_json, save_per_class_csv
+from evaluate import compute_mean_auc, compute_multilabel_metrics, evaluate_model, print_auc_table, save_metrics_json, save_per_class_csv
 from models import build_model
 from train import ExperimentTrainer, build_criterion
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train or smoke-test a configured model.")
+    parser = argparse.ArgumentParser(description="Train and evaluate a configured model.")
     parser.add_argument("--config", required=True, help="Path to a YAML config file.")
     parser.add_argument("--device", default=None, choices=["auto", "cuda", "mps", "cpu"], help="Device override.")
     parser.add_argument("--no-mlflow", action="store_true", help="Disable MLflow logging.")
@@ -88,56 +89,6 @@ def _manifest_image_paths_exist(manifest_paths: list[Path]) -> bool:
     return True
 
 
-def _sample_manifest(source_path: Path, destination_path: Path, max_rows: int, seed: int) -> None:
-    frame = pd.read_csv(source_path)
-    if max_rows > 0 and len(frame) > max_rows:
-        frame = frame.sample(n=max_rows, random_state=seed).sort_index()
-    destination_path.parent.mkdir(parents=True, exist_ok=True)
-    frame.to_csv(destination_path, index=False)
-
-
-def maybe_prepare_smoke_manifests(config: dict[str, Any]) -> dict[str, Any]:
-    smoke_config = config.get("smoke_test", {})
-    if not smoke_config.get("enabled", False):
-        return config
-
-    data_config = config["data"]
-    seed = int(config.get("project", {}).get("seed", 42))
-    run_name = config.get("run", {}).get("name", "smoke_test")
-    smoke_dir = Path(data_config.get("manifest_dir", "../data/manifests")) / "smoke"
-
-    train_path = smoke_dir / f"{run_name}_train.csv"
-    val_path = smoke_dir / f"{run_name}_val.csv"
-    test_path = smoke_dir / f"{run_name}_test.csv"
-
-    _sample_manifest(
-        Path(data_config["train_manifest"]),
-        train_path,
-        int(smoke_config.get("max_train_samples", 512)),
-        seed,
-    )
-    _sample_manifest(
-        Path(data_config["val_manifest"]),
-        val_path,
-        int(smoke_config.get("max_val_samples", 128)),
-        seed,
-    )
-    if Path(data_config["test_manifest"]).exists():
-        _sample_manifest(
-            Path(data_config["test_manifest"]),
-            test_path,
-            int(smoke_config.get("max_test_samples", 128)),
-            seed,
-        )
-
-    config = dict(config)
-    config["data"] = dict(data_config)
-    config["data"]["train_manifest"] = str(train_path)
-    config["data"]["val_manifest"] = str(val_path)
-    config["data"]["test_manifest"] = str(test_path)
-    return config
-
-
 def maybe_start_mlflow(config: dict[str, Any], disabled: bool):
     if disabled:
         return None
@@ -174,6 +125,89 @@ def flatten_config(config: dict[str, Any], prefix: str = "") -> dict[str, Any]:
     return flat
 
 
+def gpu_memory_metrics(device: torch.device) -> dict[str, float]:
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return {
+            "gpu_memory_allocated_mb": 0.0,
+            "gpu_memory_reserved_mb": 0.0,
+            "gpu_peak_memory_allocated_mb": 0.0,
+            "gpu_peak_memory_reserved_mb": 0.0,
+        }
+    bytes_per_mb = 1024.0 * 1024.0
+    return {
+        "gpu_memory_allocated_mb": float(torch.cuda.memory_allocated(device) / bytes_per_mb),
+        "gpu_memory_reserved_mb": float(torch.cuda.memory_reserved(device) / bytes_per_mb),
+        "gpu_peak_memory_allocated_mb": float(torch.cuda.max_memory_allocated(device) / bytes_per_mb),
+        "gpu_peak_memory_reserved_mb": float(torch.cuda.max_memory_reserved(device) / bytes_per_mb),
+    }
+
+
+def reset_gpu_peak_memory(device: torch.device) -> None:
+    if device.type == "cuda" and torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats(device)
+
+
+def save_training_charts(history: list[dict[str, float]], metrics_dir: Path, run_name: str) -> dict[str, Path]:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    paths: dict[str, Path] = {}
+    if not history:
+        return paths
+    frame = pd.DataFrame(history)
+
+    loss_path = metrics_dir / f"{run_name}_loss_curve.png"
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.plot(frame["epoch"], frame["train_loss"], label="train_loss")
+    ax.plot(frame["epoch"], frame["val_loss"], label="val_loss")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Loss")
+    ax.set_title(f"{run_name}: train/val loss")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(loss_path, dpi=160)
+    plt.close(fig)
+    paths["loss_curve"] = loss_path
+
+    f1_path = metrics_dir / f"{run_name}_f1_vs_epoch.png"
+    fig, ax = plt.subplots(figsize=(7, 4))
+    if "val_macro_f1" in frame:
+        ax.plot(frame["epoch"], frame["val_macro_f1"], label="val_macro_f1")
+    if "val_micro_f1" in frame:
+        ax.plot(frame["epoch"], frame["val_micro_f1"], label="val_micro_f1")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("F1")
+    ax.set_title(f"{run_name}: F1 vs epoch")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(f1_path, dpi=160)
+    plt.close(fig)
+    paths["f1_vs_epoch"] = f1_path
+    return paths
+
+
+def save_confusion_matrix_chart(metrics: dict[str, Any], output_path: Path) -> None:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    matrix = np.asarray(metrics.get("aggregate_confusion_matrix", [[0, 0], [0, 0]]), dtype=np.int64)
+    fig, ax = plt.subplots(figsize=(4, 4))
+    im = ax.imshow(matrix, cmap="Blues")
+    ax.set_xticks([0, 1], labels=["Pred 0", "Pred 1"])
+    ax.set_yticks([0, 1], labels=["True 0", "True 1"])
+    ax.set_title("Aggregate multilabel confusion matrix")
+    for i in range(2):
+        for j in range(2):
+            ax.text(j, i, str(int(matrix[i, j])), ha="center", va="center", color="black")
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=160)
+    plt.close(fig)
+
+
 def save_checkpoint(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
@@ -206,7 +240,6 @@ def main() -> None:
     set_seed(int(config.get("project", {}).get("seed", 42)))
 
     ensure_manifests(config, force=args.force_manifests)
-    config = maybe_prepare_smoke_manifests(config)
 
     device = resolve_device(args.device or config.get("project", {}).get("device", "auto"))
     print(f"Using device: {device}")
@@ -244,6 +277,7 @@ def main() -> None:
     patience = int(config.get("training", {}).get("early_stopping_patience", 0))
     patience_counter = 0
     history: list[dict[str, float]] = []
+    run_start_time = time.perf_counter()
 
     try:
         if mlflow is not None:
@@ -251,14 +285,25 @@ def main() -> None:
 
         progress_interval = int(config.get("training", {}).get("progress_interval", 0))
         for epoch in range(1, epochs + 1):
+            reset_gpu_peak_memory(device)
+            epoch_start_time = time.perf_counter()
             train_loss = trainer.train_epoch(
                 dataloaders["train"],
                 epoch=epoch,
                 total_epochs=epochs,
                 progress_interval=progress_interval,
             )
+            train_time_sec = time.perf_counter() - epoch_start_time
+            val_start_time = time.perf_counter()
             val_loss, val_preds, val_labels = trainer.val_epoch(dataloaders["val"])
+            val_time_sec = time.perf_counter() - val_start_time
+            epoch_time_sec = time.perf_counter() - epoch_start_time
             auc_results = compute_mean_auc(val_labels, val_preds)
+            val_metrics = compute_multilabel_metrics(
+                val_labels,
+                val_preds,
+                threshold=float(config.get("evaluation", {}).get("threshold", 0.5)),
+            )
             val_mean_auc = auc_results["mean"]
 
             history_row = {
@@ -266,6 +311,16 @@ def main() -> None:
                 "train_loss": float(train_loss),
                 "val_loss": float(val_loss),
                 "val_mean_auc": float(val_mean_auc),
+                "val_mean_average_precision": float(val_metrics["mean_pr_auc"] or 0.0),
+                "val_macro_f1": float(val_metrics["macro_f1"]),
+                "val_micro_f1": float(val_metrics["micro_f1"]),
+                "val_macro_precision": float(val_metrics["macro_precision"]),
+                "val_macro_recall": float(val_metrics["macro_recall"]),
+                "train_time_sec": float(train_time_sec),
+                "val_time_sec": float(val_time_sec),
+                "epoch_time_sec": float(epoch_time_sec),
+                **trainer.average_gpu_stats(),
+                **gpu_memory_metrics(device),
             }
             history.append(history_row)
 
@@ -273,7 +328,10 @@ def main() -> None:
                 f"epoch={epoch}/{epochs} "
                 f"train_loss={train_loss:.4f} "
                 f"val_loss={val_loss:.4f} "
-                f"val_mean_auc={val_mean_auc:.4f}"
+                f"val_mean_auc={val_mean_auc:.4f} "
+                f"val_macro_f1={val_metrics['macro_f1']:.4f} "
+                f"epoch_time_sec={epoch_time_sec:.1f} "
+                f"gpu_peak_mb={history_row['gpu_peak_memory_allocated_mb']:.1f}"
             )
 
             if mlflow is not None:
@@ -317,10 +375,13 @@ def main() -> None:
         pd.DataFrame(history).to_csv(history_path, index=False)
         auc_path.write_text(json.dumps(auc_results, indent=2))
         criterion_path.write_text(json.dumps(criterion_summary, indent=2))
+        chart_paths = save_training_charts(history, artifacts_dir, run_name)
 
         test_metrics_path = None
         test_per_class_path = None
+        test_confusion_path = None
         if best_checkpoint is not None and "test" in dataloaders:
+            test_start_time = time.perf_counter()
             checkpoint = torch.load(best_checkpoint, map_location=device)
             model.load_state_dict(checkpoint["model_state_dict"])
             threshold = float(config.get("evaluation", {}).get("threshold", 0.5))
@@ -338,12 +399,17 @@ def main() -> None:
                     "checkpoint_path": str(best_checkpoint),
                     "checkpoint_epoch": checkpoint.get("epoch"),
                     "checkpoint_val_mean_auc": checkpoint.get("val_mean_auc"),
+                    "test_time_sec": float(time.perf_counter() - test_start_time),
+                    "total_run_time_sec": float(time.perf_counter() - run_start_time),
+                    **{f"final_{key}": value for key, value in gpu_memory_metrics(device).items()},
                 }
             )
             test_metrics_path = artifacts_dir / f"{run_name}_test_metrics.json"
             test_per_class_path = artifacts_dir / f"{run_name}_test_per_class_metrics.csv"
+            test_confusion_path = artifacts_dir / f"{run_name}_test_confusion_matrix.png"
             save_metrics_json(test_metrics, test_metrics_path)
             save_per_class_csv(test_metrics, test_per_class_path)
+            save_confusion_matrix_chart(test_metrics, test_confusion_path)
             print(
                 f"Test metrics: loss={test_metrics['loss']:.4f} "
                 f"mean_auroc={test_metrics['mean_auroc']:.4f} "
@@ -355,12 +421,16 @@ def main() -> None:
             mlflow.log_artifact(str(history_path))
             mlflow.log_artifact(str(auc_path))
             mlflow.log_artifact(str(criterion_path))
+            for chart_path in chart_paths.values():
+                mlflow.log_artifact(str(chart_path))
             if best_checkpoint is not None:
                 mlflow.log_artifact(str(best_checkpoint))
             if test_metrics_path is not None:
                 mlflow.log_artifact(str(test_metrics_path))
             if test_per_class_path is not None:
                 mlflow.log_artifact(str(test_per_class_path))
+            if test_confusion_path is not None:
+                mlflow.log_artifact(str(test_confusion_path))
 
         print(f"Best val mean AUC: {best_auc:.4f}")
         if best_checkpoint is not None:
@@ -370,6 +440,7 @@ def main() -> None:
         if test_metrics_path is not None:
             print(f"Test metrics JSON: {test_metrics_path}")
             print(f"Test per-class CSV: {test_per_class_path}")
+            print(f"Test confusion matrix PNG: {test_confusion_path}")
     finally:
         if mlflow is not None:
             mlflow.end_run()

@@ -1,0 +1,8 @@
+extends: cnn_densenet121_base.yaml
+
+run:
+  name: densenet121_pretrained_bce
+  type: pretraining_ablation
+
+training:
+  loss: bce_with_logits
