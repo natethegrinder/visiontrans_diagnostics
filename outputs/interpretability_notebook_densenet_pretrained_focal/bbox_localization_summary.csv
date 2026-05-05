@@ -1,0 +1,7 @@
+disease,iou_densenet_cam,ar_densenet_cam,pg_densenet_cam,probability
+Atelectasis,0.125,2.485,0.1,0.57
+Cardiomegaly,0.59,3.51,1.0,0.607
+Effusion,0.182,2.932,0.3,0.644
+Mass,0.182,3.553,0.5,0.696
+Nodule,0.012,1.402,0.0,0.615
+Pneumothorax,0.189,2.146,0.4,0.63
