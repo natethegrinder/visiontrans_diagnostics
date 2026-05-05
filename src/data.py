@@ -216,7 +216,7 @@ def build_nih_manifests(
     metadata = metadata[metadata["image_path"] != ""].reset_index(drop=True)
 
     if metadata.empty:
-        raise ValueError("None of the NIH metadata entries could be matched to files in data/raw")
+        raise ValueError("None of the NIH metadata entries could be matched to files in the configured raw_dir")
 
     encoded_labels = metadata["labels"].apply(encode_labels).apply(pd.Series)
     metadata = pd.concat([metadata, encoded_labels], axis=1)
@@ -399,6 +399,8 @@ def build_dataloaders(
     num_channels = int(data_config.get("num_channels", 1))
     batch_size = int(training_config.get("batch_size", data_config.get("batch_size", 32)))
     num_workers = int(data_config.get("num_workers", 4))
+    persistent_workers = bool(data_config.get("persistent_workers", num_workers > 0))
+    prefetch_factor = int(data_config.get("prefetch_factor", 4))
 
     datasets = {
         "train": NihChestXrayDataset(
@@ -429,16 +431,21 @@ def build_dataloaders(
             std=std,
         )
 
-    dataloaders = {
-        split_name: DataLoader(
+    dataloaders = {}
+    for split_name, dataset in datasets.items():
+        loader_kwargs = {
+            "batch_size": batch_size,
+            "shuffle": split_name == "train",
+            "num_workers": num_workers,
+            "pin_memory": torch.cuda.is_available(),
+            "persistent_workers": persistent_workers if num_workers > 0 else False,
+        }
+        if num_workers > 0:
+            loader_kwargs["prefetch_factor"] = prefetch_factor
+        dataloaders[split_name] = DataLoader(
             dataset,
-            batch_size=batch_size,
-            shuffle=(split_name == "train"),
-            num_workers=num_workers,
-            pin_memory=torch.cuda.is_available(),
+            **loader_kwargs,
         )
-        for split_name, dataset in datasets.items()
-    }
 
     return dataloaders
 

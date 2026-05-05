@@ -5,7 +5,13 @@ run:
   type: architecture_comparison
 
 data:
+  image_size: 224
   num_channels: 1
+  num_classes: 14
+  batch_size: 96
+  num_workers: 8
+  persistent_workers: false
+  prefetch_factor: 2
 
 model:
   family: cnn
@@ -14,7 +20,27 @@ model:
   dropout: 0.2
 
 training:
+  optimizer: adamw
   learning_rate: 0.0001
-  batch_size: 32
+  batch_size: 96
   epochs: 30
   weight_decay: 0.0001
+  loss: bce_with_logits
+  scheduler: cosine
+  mixed_precision: true
+  cudnn_benchmark: true
+  float32_matmul_precision: high
+  progress_interval: 50
+  early_stopping_patience: 7
+  imbalance:
+    enabled: true
+    strategy: pos_weight
+    min_positive_count: 1.0
+    max_pos_weight: 20.0
+
+evaluation:
+  threshold: 0.5
+
+artifacts:
+  model_dir: artifacts/models
+  metrics_dir: artifacts/metrics

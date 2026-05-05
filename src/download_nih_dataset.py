@@ -189,8 +189,8 @@ def export_nih_annotation_files(
 def download_and_prepare_nih_dataset(
     dataset: str = DEFAULT_KAGGLE_DATASET_URL,
     version: Optional[int] = None,
-    output_dir: str | Path = "data/raw",
-    annotations_dir: str | Path = "data/annotations",
+    output_dir: str | Path = "../data/raw",
+    annotations_dir: str | Path = "../data/annotations",
     force_download: bool = False,
 ) -> dict[str, object]:
     dataset_handle, resolved_version = resolve_kaggle_dataset_reference(dataset, version)
@@ -244,12 +244,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--output-dir",
-        default="data/raw",
+        default="../data/raw",
         help="Directory where the Kaggle dataset will be downloaded.",
     )
     parser.add_argument(
         "--annotations-dir",
-        default="data/annotations",
+        default="../data/annotations",
         help="Directory where Data_Entry_2017.csv, split lists, and bbox CSV will be copied.",
     )
     parser.add_argument(
